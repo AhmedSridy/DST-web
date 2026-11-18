@@ -1,0 +1,739 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net (Default-Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ==================== Primitive Helpers ====================
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true && ('email' in request.auth.token);
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Explicit bootstrap admin email (never "first user becomes admin")
+    function isBootstrappedAdmin() {
+      return isVerified() && request.auth.token.email.lower() == 'ahmedsridy@gmail.com';
+    }
+
+    function callerUserPath() {
+      return /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+
+    function hasUserDoc() {
+      return exists(callerUserPath());
+    }
+
+    function userDoc() {
+      return get(callerUserPath()).data;
+    }
+
+    function isActiveCaller() {
+      return isBootstrappedAdmin() || (
+        isVerified() &&
+        hasUserDoc() &&
+        userDoc().isActive == true
+      );
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() || (
+        isActiveCaller() &&
+        userDoc().role == 'admin'
+      );
+    }
+
+    function isChief() {
+      return isAdmin() || (
+        isActiveCaller() &&
+        userDoc().role == 'chief'
+      );
+    }
+
+    function isSupervisorOrAbove() {
+      return isAdmin() || (
+        isActiveCaller() &&
+        userDoc().role in ['supervisor', 'chief', 'admin']
+      );
+    }
+
+    // Chief without assigned governorates OR Admin has nationwide governorate access;
+    // any scoped user is strictly confined to users/{uid}.governorateIds / governorateId.
+    function isUnrestrictedGovCaller() {
+      return isAdmin() || (
+        isActiveCaller() &&
+        userDoc().role == 'chief' &&
+        (!('governorateIds' in userDoc()) || !(userDoc().governorateIds is list) || userDoc().governorateIds.size() == 0) &&
+        (!('governorateId' in userDoc()) || userDoc().governorateId == '')
+      );
+    }
+
+    function userCanAccessGov(govId) {
+      return isUnrestrictedGovCaller() || (
+        isActiveCaller() &&
+        govId is string &&
+        govId.size() >= 1 &&
+        govId.size() <= 128 && (
+          ('governorateIds' in userDoc() && userDoc().governorateIds is list && govId in userDoc().governorateIds) ||
+          ('governorateId' in userDoc() && userDoc().governorateId == govId)
+        )
+      );
+    }
+
+    function hasPermOrRoleDefault(permKey, defaultRoles) {
+      return isAdmin() || (
+        isActiveCaller() && (
+          ('permissions' in userDoc() &&
+            userDoc().permissions is map &&
+            permKey in userDoc().permissions &&
+            userDoc().permissions[permKey] is bool &&
+            userDoc().permissions[permKey] == true) ||
+          (!('permissions' in userDoc() &&
+            userDoc().permissions is map &&
+            permKey in userDoc().permissions) &&
+            userDoc().role in defaultRoles)
+        )
+      );
+    }
+
+    function canEditInGov(govId) {
+      return hasPermOrRoleDefault('canEdit', ['field_staff', 'supervisor', 'admin']) && userCanAccessGov(govId);
+    }
+
+    function canClearDayInGov(govId) {
+      return hasPermOrRoleDefault('canClearDay', ['supervisor', 'admin']) && userCanAccessGov(govId);
+    }
+
+    function canManageAssociationsInGov(govId) {
+      return hasPermOrRoleDefault('canManageAssociations', ['supervisor', 'admin']) && userCanAccessGov(govId);
+    }
+
+    function canApproveInGov(govId) {
+      return hasPermOrRoleDefault('canApprove', ['supervisor', 'chief', 'admin']) && userCanAccessGov(govId);
+    }
+
+    function isNullableNonNegativeNumber(val) {
+      return val == null || (val is number && val >= 0);
+    }
+
+    function isNullableNumber(val) {
+      return val == null || val is number;
+    }
+
+    function isValidDateIso(val) {
+      return val is string && val.size() >= 8 && val.size() <= 20 && val.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
+    }
+
+    // ==================== Validation Blueprints ====================
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'isActive']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'governorateId', 'governorateIds', 'permissions', 'passwordHash', 'inviteId', 'isActive', 'createdAt', 'updatedAt']) &&
+        isValidId(data.uid) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
+        data.role in ['field_staff', 'supervisor', 'chief', 'admin', 'viewer'] &&
+        (!('governorateId' in data) || (data.governorateId is string && data.governorateId.size() <= 128)) &&
+        (!('governorateIds' in data) || (data.governorateIds is list && data.governorateIds.size() <= 30 && (data.governorateIds.size() == 0 || data.governorateIds[0] is string))) &&
+        (!('permissions' in data) || data.permissions is map) &&
+        (!('passwordHash' in data) || (data.passwordHash is string && data.passwordHash.size() <= 128)) &&
+        (!('inviteId' in data) || isValidId(data.inviteId)) &&
+        data.isActive is bool &&
+        (!('createdAt' in data) || data.createdAt is timestamp) &&
+        (!('updatedAt' in data) || data.updatedAt is timestamp);
+    }
+
+    function isValidUserInvite(data) {
+      return data.keys().hasAll(['email', 'displayName', 'role', 'governorateIds', 'isActive', 'createdByUid']) &&
+        data.keys().hasOnly(['id', 'email', 'displayName', 'role', 'governorateId', 'governorateIds', 'permissions', 'isActive', 'claimedUid', 'createdByUid', 'createdAt', 'updatedAt']) &&
+        (!('id' in data) || isValidId(data.id)) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
+        data.role in ['field_staff', 'supervisor', 'chief', 'admin', 'viewer'] &&
+        (!('governorateId' in data) || (data.governorateId is string && data.governorateId.size() <= 128)) &&
+        data.governorateIds is list && data.governorateIds.size() <= 30 &&
+        (data.governorateIds.size() == 0 || data.governorateIds[0] is string) &&
+        (!('permissions' in data) || data.permissions is map) &&
+        data.isActive is bool &&
+        (!('claimedUid' in data) || isValidId(data.claimedUid)) &&
+        isValidId(data.createdByUid) &&
+        (!('createdAt' in data) || data.createdAt is timestamp) &&
+        (!('updatedAt' in data) || data.updatedAt is timestamp);
+    }
+
+    function isValidInviteClaim(data, userId) {
+      return 'inviteId' in data &&
+        isValidId(data.inviteId) &&
+        data.uid == request.auth.uid &&
+        data.uid == userId &&
+        exists(/databases/$(database)/documents/user_invites/$(data.inviteId)) &&
+        get(/databases/$(database)/documents/user_invites/$(data.inviteId)).data.isActive == true &&
+        get(/databases/$(database)/documents/user_invites/$(data.inviteId)).data.email == request.auth.token.email.lower() &&
+        (!('claimedUid' in get(/databases/$(database)/documents/user_invites/$(data.inviteId)).data) ||
+          get(/databases/$(database)/documents/user_invites/$(data.inviteId)).data.claimedUid == request.auth.uid) &&
+        data.email.lower() == get(/databases/$(database)/documents/user_invites/$(data.inviteId)).data.email &&
+        data.role == get(/databases/$(database)/documents/user_invites/$(data.inviteId)).data.role &&
+        data.isActive == true &&
+        (!('governorateIds' in data) || data.governorateIds == get(/databases/$(database)/documents/user_invites/$(data.inviteId)).data.governorateIds) &&
+        (!('governorateId' in get(/databases/$(database)/documents/user_invites/$(data.inviteId)).data) ||
+          data.governorateId == get(/databases/$(database)/documents/user_invites/$(data.inviteId)).data.governorateId) &&
+        (!('permissions' in get(/databases/$(database)/documents/user_invites/$(data.inviteId)).data) ||
+          data.permissions == get(/databases/$(database)/documents/user_invites/$(data.inviteId)).data.permissions);
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll(['userId', 'title', 'message', 'severity', 'isRead']) &&
+        data.keys().hasOnly(['userId', 'title', 'message', 'severity', 'isRead', 'createdAt']) &&
+        isValidId(data.userId) &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 150 &&
+        data.message is string && data.message.size() >= 1 && data.message.size() <= 500 &&
+        data.severity in ['info', 'warning', 'error', 'success'] &&
+        data.isRead is bool &&
+        (!('createdAt' in data) || data.createdAt is timestamp);
+    }
+
+    function isValidDailyReport(data) {
+      return data.keys().hasAll(['governorateId', 'reportDate', 'status', 'createdByUid']) &&
+        data.keys().hasOnly(['governorateId', 'reportDate', 'status', 'createdByUid', 'createdByName', 'rejectionReason', 'centralSyncStatus', 'createdAt', 'updatedAt']) &&
+        isValidId(data.governorateId) &&
+        isValidDateIso(data.reportDate) &&
+        data.status in ['draft', 'completed', 'under_review', 'approved', 'rejected'] &&
+        isValidId(data.createdByUid) &&
+        (!('createdByName' in data) || (data.createdByName is string && data.createdByName.size() <= 120)) &&
+        (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 500)) &&
+        (!('centralSyncStatus' in data) || data.centralSyncStatus in ['pending', 'synced', 'failed']) &&
+        (!('createdAt' in data) || data.createdAt is timestamp) &&
+        (!('updatedAt' in data) || data.updatedAt is timestamp);
+    }
+
+    function isValidDailyDisbursement(data) {
+      return data.keys().hasAll(['reportId', 'governorateId', 'associationId', 'fertilizerCode', 'createdByUid']) &&
+        data.keys().hasOnly(['reportId', 'governorateId', 'associationId', 'fertilizerCode', 'openingBalance', 'closingBalance', 'settlementQty', 'actualDisbursed', 'variance', 'varianceReason', 'createdByUid', 'updatedAt']) &&
+        isValidId(data.reportId) &&
+        isValidId(data.governorateId) &&
+        isValidId(data.associationId) &&
+        data.fertilizerCode in ['urea', 'nitrate', 'sulfate'] &&
+        (!('openingBalance' in data) || isNullableNonNegativeNumber(data.openingBalance)) &&
+        (!('closingBalance' in data) || isNullableNonNegativeNumber(data.closingBalance)) &&
+        (!('settlementQty' in data) || isNullableNonNegativeNumber(data.settlementQty)) &&
+        (!('actualDisbursed' in data) || isNullableNumber(data.actualDisbursed)) &&
+        (!('variance' in data) || isNullableNumber(data.variance)) &&
+        (!('varianceReason' in data) || (data.varianceReason is string && data.varianceReason.size() <= 500)) &&
+        isValidId(data.createdByUid) &&
+        (!('updatedAt' in data) || data.updatedAt is timestamp);
+    }
+
+    function isValidTractorDelivery(data) {
+      return data.keys().hasAll(['governorateId', 'associationId', 'tractorPlate', 'arrivalDate', 'fertilizerCode', 'manifestNumber', 'manifestBags', 'actualBags', 'inspectionStatus', 'approvalState', 'createdByUid']) &&
+        data.keys().hasOnly(['governorateId', 'centerId', 'associationId', 'tractorPlate', 'arrivalDate', 'arrivalTime', 'fertilizerCode', 'driverName', 'driverPhone', 'driverNationalId', 'supplySource', 'manifestNumber', 'manifestBags', 'actualBags', 'bagVariance', 'inspectionStatus', 'approvalState', 'checklist', 'notes', 'createdByUid', 'createdAt']) &&
+        isValidId(data.governorateId) &&
+        isValidId(data.associationId) &&
+        (!('centerId' in data) || data.centerId == '' || isValidId(data.centerId)) &&
+        data.tractorPlate is string && data.tractorPlate.size() >= 1 && data.tractorPlate.size() <= 40 &&
+        isValidDateIso(data.arrivalDate) &&
+        (!('arrivalTime' in data) || (data.arrivalTime is string && data.arrivalTime.size() <= 20)) &&
+        data.fertilizerCode in ['urea', 'nitrate', 'sulfate'] &&
+        (!('driverName' in data) || (data.driverName is string && data.driverName.size() <= 120)) &&
+        (!('driverPhone' in data) || (data.driverPhone is string && data.driverPhone.size() <= 30)) &&
+        (!('driverNationalId' in data) || (data.driverNationalId is string && data.driverNationalId.size() <= 20)) &&
+        (!('supplySource' in data) || (data.supplySource is string && data.supplySource.size() <= 150)) &&
+        data.manifestNumber is string && data.manifestNumber.size() >= 1 && data.manifestNumber.size() <= 60 &&
+        data.manifestBags is int && data.manifestBags >= 0 &&
+        data.actualBags is int && data.actualBags >= 0 &&
+        (!('bagVariance' in data) || data.bagVariance is int) &&
+        data.inspectionStatus in ['matched', 'shortage', 'surplus', 'damaged'] &&
+        data.approvalState in ['pending', 'final_approved'] &&
+        (!('checklist' in data) || data.checklist is map) &&
+        (!('notes' in data) || (data.notes is string && data.notes.size() <= 500)) &&
+        isValidId(data.createdByUid) &&
+        (!('createdAt' in data) || data.createdAt is timestamp);
+    }
+
+    function isValidApprovalRecord(data) {
+      return data.keys().hasAll(['reportId', 'governorateId', 'reportDate', 'action', 'fromStatus', 'toStatus', 'actorUid', 'actorRole']) &&
+        data.keys().hasOnly(['reportId', 'governorateId', 'reportDate', 'action', 'fromStatus', 'toStatus', 'actorUid', 'actorName', 'actorRole', 'notes', 'createdAt']) &&
+        isValidId(data.reportId) &&
+        isValidId(data.governorateId) &&
+        isValidDateIso(data.reportDate) &&
+        data.action in ['submitted', 'reviewed', 'approved', 'rejected', 'reopened'] &&
+        data.fromStatus in ['draft', 'completed', 'under_review', 'approved', 'rejected'] &&
+        data.toStatus in ['draft', 'completed', 'under_review', 'approved', 'rejected'] &&
+        isValidId(data.actorUid) &&
+        (!('actorName' in data) || (data.actorName is string && data.actorName.size() <= 120)) &&
+        data.actorRole in ['field_staff', 'supervisor', 'chief', 'admin', 'viewer'] &&
+        (!('notes' in data) || (data.notes is string && data.notes.size() <= 500)) &&
+        (!('createdAt' in data) || data.createdAt is timestamp);
+    }
+
+    function isValidIntegrationLog(data) {
+      return data.keys().hasAll(['reportId', 'governorateId', 'reportDate', 'endpointUrl', 'status', 'dispatchedByUid']) &&
+        data.keys().hasOnly(['reportId', 'governorateId', 'reportDate', 'endpointUrl', 'status', 'httpStatus', 'payloadSummary', 'responseMessage', 'dispatchedByUid', 'createdAt']) &&
+        isValidId(data.reportId) &&
+        isValidId(data.governorateId) &&
+        isValidDateIso(data.reportDate) &&
+        data.endpointUrl is string && data.endpointUrl.size() <= 300 &&
+        data.status in ['success', 'failed'] &&
+        (!('httpStatus' in data) || data.httpStatus is int) &&
+        (!('payloadSummary' in data) || (data.payloadSummary is string && data.payloadSummary.size() <= 400)) &&
+        (!('responseMessage' in data) || (data.responseMessage is string && data.responseMessage.size() <= 400)) &&
+        isValidId(data.dispatchedByUid) &&
+        (!('createdAt' in data) || data.createdAt is timestamp);
+    }
+
+    function isValidImageAttachment(data) {
+      return data.keys().hasAll(['governorateId', 'associationId', 'associationName', 'fertilizerCode', 'reportDate', 'analyzedByUid']) &&
+        data.keys().hasOnly(['governorateId', 'associationId', 'associationName', 'fertilizerCode', 'reportDate', 'extractedOpeningBalance', 'extractedClosingBalance', 'extractedSettlement', 'confidence', 'notes', 'rawResponseText', 'analyzedByUid', 'createdAt']) &&
+        isValidId(data.governorateId) &&
+        isValidId(data.associationId) &&
+        data.associationName is string && data.associationName.size() >= 1 && data.associationName.size() <= 150 &&
+        data.fertilizerCode in ['urea', 'nitrate', 'sulfate'] &&
+        isValidDateIso(data.reportDate) &&
+        (!('extractedOpeningBalance' in data) || isNullableNonNegativeNumber(data.extractedOpeningBalance)) &&
+        (!('extractedClosingBalance' in data) || isNullableNonNegativeNumber(data.extractedClosingBalance)) &&
+        (!('extractedSettlement' in data) || isNullableNonNegativeNumber(data.extractedSettlement)) &&
+        (!('confidence' in data) || (data.confidence is number && data.confidence >= 0 && data.confidence <= 1)) &&
+        (!('notes' in data) || (data.notes is string && data.notes.size() <= 500)) &&
+        (!('rawResponseText' in data) || (data.rawResponseText is string && data.rawResponseText.size() <= 4000)) &&
+        isValidId(data.analyzedByUid) &&
+        (!('createdAt' in data) || data.createdAt is timestamp);
+    }
+
+    function isValidGovernorate(data) {
+      return data.keys().hasAll(['code', 'nameAr', 'isActive']) &&
+        data.keys().hasOnly(['code', 'nameAr', 'region', 'isActive']) &&
+        data.code is string && data.code.size() >= 1 && data.code.size() <= 20 &&
+        data.nameAr is string && data.nameAr.size() >= 1 && data.nameAr.size() <= 100 &&
+        (!('region' in data) || (data.region is string && data.region.size() <= 80)) &&
+        data.isActive is bool;
+    }
+
+    function isValidCenter(data) {
+      return data.keys().hasAll(['governorateId', 'code', 'nameAr', 'isActive']) &&
+        data.keys().hasOnly(['governorateId', 'code', 'nameAr', 'isActive']) &&
+        isValidId(data.governorateId) &&
+        data.code is string && data.code.size() >= 1 && data.code.size() <= 32 &&
+        data.nameAr is string && data.nameAr.size() >= 1 && data.nameAr.size() <= 120 &&
+        data.isActive is bool;
+    }
+
+    function isValidVillage(data) {
+      return data.keys().hasAll(['governorateId', 'centerId', 'nameAr', 'isActive']) &&
+        data.keys().hasOnly(['governorateId', 'centerId', 'nameAr', 'isActive']) &&
+        isValidId(data.governorateId) &&
+        isValidId(data.centerId) &&
+        data.nameAr is string && data.nameAr.size() >= 1 && data.nameAr.size() <= 120 &&
+        data.isActive is bool;
+    }
+
+    function isValidAssociation(data) {
+      return data.keys().hasAll(['code', 'nameAr', 'normalizedName', 'governorateId', 'centerId', 'isActive']) &&
+        data.keys().hasOnly(['code', 'nameAr', 'normalizedName', 'governorateId', 'centerId', 'villageId', 'managerName', 'managerPhone', 'supervisionType', 'distributionDay', 'capacity', 'notes', 'sortOrder', 'isActive', 'active', 'createdByUid', 'createdByName', 'createdAt', 'updatedAt']) &&
+        data.code is string && data.code.size() >= 1 && data.code.size() <= 40 &&
+        data.nameAr is string && data.nameAr.size() >= 1 && data.nameAr.size() <= 120 &&
+        data.normalizedName is string && data.normalizedName.size() >= 1 && data.normalizedName.size() <= 120 &&
+        isValidId(data.governorateId) &&
+        isValidId(data.centerId) &&
+        (!('villageId' in data) || (data.villageId is string && data.villageId.size() <= 128)) &&
+        (!('managerName' in data) || (data.managerName is string && data.managerName.size() <= 120)) &&
+        (!('managerPhone' in data) || (data.managerPhone is string && data.managerPhone.size() <= 30)) &&
+        (!('supervisionType' in data) || (data.supervisionType is string && data.supervisionType.size() <= 80)) &&
+        (!('distributionDay' in data) || (data.distributionDay is string && data.distributionDay.size() <= 80)) &&
+        (!('capacity' in data) || (data.capacity is number && data.capacity >= 0)) &&
+        (!('notes' in data) || (data.notes is string && data.notes.size() <= 500)) &&
+        (!('sortOrder' in data) || (data.sortOrder is int && data.sortOrder >= 0)) &&
+        data.isActive is bool &&
+        (!('active' in data) || data.active is bool) &&
+        (!('createdByUid' in data) || isValidId(data.createdByUid)) &&
+        (!('createdByName' in data) || (data.createdByName is string && data.createdByName.size() <= 120)) &&
+        (!('createdAt' in data) || data.createdAt is timestamp || data.createdAt is string) &&
+        (!('updatedAt' in data) || data.updatedAt is timestamp || data.updatedAt is string);
+    }
+
+    function isValidAssociationNameLock(data) {
+      return data.keys().hasAll(['governorateId', 'normalizedName', 'associationId']) &&
+        data.keys().hasOnly(['governorateId', 'normalizedName', 'associationId', 'createdByUid', 'updatedAt']) &&
+        isValidId(data.governorateId) &&
+        data.normalizedName is string && data.normalizedName.size() >= 1 && data.normalizedName.size() <= 120 &&
+        isValidId(data.associationId) &&
+        (!('createdByUid' in data) || isValidId(data.createdByUid)) &&
+        (!('updatedAt' in data) || data.updatedAt is timestamp);
+    }
+
+    function isValidFertilizerType(data) {
+      return data.keys().hasAll(['code', 'nameAr', 'sortOrder', 'bagWeightKg', 'isActive']) &&
+        data.keys().hasOnly(['code', 'nameAr', 'sortOrder', 'bagWeightKg', 'isActive']) &&
+        data.code is string && data.code.size() >= 1 && data.code.size() <= 30 &&
+        data.nameAr is string && data.nameAr.size() >= 1 && data.nameAr.size() <= 80 &&
+        data.sortOrder is int && data.sortOrder >= 0 &&
+        data.bagWeightKg is number && data.bagWeightKg > 0 &&
+        data.isActive is bool;
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['actorUid', 'action', 'entityType', 'entityId']) &&
+        data.keys().hasOnly(['actorUid', 'actorEmail', 'actorName', 'actorRole', 'action', 'entityType', 'entityId', 'details', 'oldValue', 'newValue', 'createdAt']) &&
+        isValidId(data.actorUid) &&
+        (!('actorEmail' in data) || (data.actorEmail is string && data.actorEmail.size() <= 160)) &&
+        (!('actorName' in data) || (data.actorName is string && data.actorName.size() <= 120)) &&
+        (!('actorRole' in data) || data.actorRole in ['field_staff', 'supervisor', 'chief', 'admin', 'viewer']) &&
+        data.action is string && data.action.size() >= 1 && data.action.size() <= 80 &&
+        data.entityType is string && data.entityType.size() >= 1 && data.entityType.size() <= 60 &&
+        data.entityId is string && data.entityId.size() >= 1 && data.entityId.size() <= 128 &&
+        (!('details' in data) || (data.details is string && data.details.size() <= 1000)) &&
+        (!('oldValue' in data) || (data.oldValue is string && data.oldValue.size() <= 2000)) &&
+        (!('newValue' in data) || (data.newValue is string && data.newValue.size() <= 2000)) &&
+        (!('createdAt' in data) || data.createdAt is timestamp);
+    }
+
+    function isValidSystemSetting(data) {
+      return data.keys().hasAll(['requireDriverNationalId', 'centralApiUrl', 'autoSyncOnApproval']) &&
+        data.keys().hasOnly(['requireDriverNationalId', 'centralApiUrl', 'autoSyncOnApproval', 'organizationNameAr', 'treatEmptyAsZero', 'minThresholds', 'assocMinThresholds', 'seedVersion']) &&
+        data.requireDriverNationalId is bool &&
+        data.centralApiUrl is string && data.centralApiUrl.size() <= 300 &&
+        data.autoSyncOnApproval is bool &&
+        (!('organizationNameAr' in data) || (data.organizationNameAr is string && data.organizationNameAr.size() <= 180)) &&
+        (!('treatEmptyAsZero' in data) || data.treatEmptyAsZero is bool) &&
+        (!('minThresholds' in data) || data.minThresholds is map) &&
+        (!('assocMinThresholds' in data) || data.assocMinThresholds is map) &&
+        (!('seedVersion' in data) || (data.seedVersion is string && data.seedVersion.size() <= 32));
+    }
+
+    // ==================== Collections ====================
+    // Health check document for startup testConnection()
+    match /test/connection {
+      allow get: if true;
+    }
+
+    // Users collection (PII isolated; invite-only or explicit bootstrap admin)
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isVerified() && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin() || (isVerified() && resource.data.uid == request.auth.uid);
+      allow create: if isValidId(userId) && isVerified() && isValidUserProfile(incoming()) &&
+        incoming().uid == request.auth.uid &&
+        incoming().uid == userId &&
+        (!('createdAt' in incoming()) || incoming().createdAt == request.time) &&
+        (!('updatedAt' in incoming()) || incoming().updatedAt == request.time) && (
+          (isBootstrappedAdmin() &&
+            incoming().email.lower() == 'ahmedsridy@gmail.com' &&
+            incoming().role == 'admin' &&
+            incoming().isActive == true) ||
+          isValidInviteClaim(incoming(), userId)
+        );
+      allow update: if isValidId(userId) && isVerified() && isValidUserProfile(incoming()) &&
+        incoming().uid == existing().uid &&
+        (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt) &&
+        (!('updatedAt' in incoming()) || incoming().updatedAt == request.time) && (
+          isAdmin() ||
+          (isOwner(userId) &&
+            isActiveCaller() &&
+            incoming().role == existing().role &&
+            incoming().isActive == existing().isActive &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'updatedAt']))
+        );
+      allow delete: if isValidId(userId) && isAdmin() && userId != request.auth.uid;
+    }
+
+    // User Invites (Admin creates; matching verified Google user can read/claim once)
+    match /user_invites/{inviteId} {
+      allow get: if isValidId(inviteId) && isVerified() && (
+        isAdmin() ||
+        (resource != null && resource.data.email == request.auth.token.email.lower())
+      );
+      allow list: if isAdmin() || (
+        isVerified() &&
+        resource.data.email == request.auth.token.email.lower()
+      );
+      allow create: if isValidId(inviteId) && isAdmin() && isValidUserInvite(incoming()) &&
+        incoming().createdByUid == request.auth.uid &&
+        (!('createdAt' in incoming()) || incoming().createdAt == request.time);
+      allow update: if isValidId(inviteId) && isVerified() && isValidUserInvite(incoming()) &&
+        (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt) &&
+        (!('updatedAt' in incoming()) || incoming().updatedAt == request.time) && (
+          isAdmin() ||
+          (existing().email == request.auth.token.email.lower() &&
+            existing().isActive == true &&
+            !('claimedUid' in existing()) &&
+            incoming().claimedUid == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['claimedUid', 'updatedAt']))
+        );
+      allow delete: if isValidId(inviteId) && isAdmin();
+    }
+
+    // Notifications (User-scoped)
+    match /notifications/{notificationId} {
+      allow get: if isValidId(notificationId) && isActiveCaller() && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isActiveCaller() && (isAdmin() || resource.data.userId == request.auth.uid);
+      allow create: if isValidId(notificationId) && isActiveCaller() && isValidNotification(incoming()) &&
+        (!('createdAt' in incoming()) || incoming().createdAt == request.time) &&
+        (isAdmin() || incoming().userId == request.auth.uid);
+      allow update: if isValidId(notificationId) && isActiveCaller() && isValidNotification(incoming()) &&
+        incoming().userId == existing().userId && (
+          isAdmin() ||
+          (existing().userId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['isRead']))
+        );
+      allow delete: if isValidId(notificationId) && isActiveCaller() && (existing().userId == request.auth.uid || isAdmin());
+    }
+
+    // Daily Reports (Governorate-scoped + Workflow Status Guarded)
+    match /daily_reports/{reportId} {
+      allow get: if isValidId(reportId) && isActiveCaller() && userCanAccessGov(existing().governorateId);
+      allow list: if isUnrestrictedGovCaller() || (
+        isActiveCaller() &&
+        userCanAccessGov(resource.data.governorateId)
+      );
+      allow create: if isValidId(reportId) && isActiveCaller() && isValidDailyReport(incoming()) &&
+        canEditInGov(incoming().governorateId) &&
+        incoming().createdByUid == request.auth.uid &&
+        (isAdmin() || incoming().status == 'draft') &&
+        (!('createdAt' in incoming()) || incoming().createdAt == request.time);
+      allow update: if isValidId(reportId) && isActiveCaller() && isValidDailyReport(incoming()) &&
+        incoming().governorateId == existing().governorateId &&
+        incoming().createdByUid == existing().createdByUid &&
+        (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt) &&
+        (!('updatedAt' in incoming()) || incoming().updatedAt == request.time) && (
+          isAdmin() ||
+          (existing().status == 'approved' &&
+            isChief() &&
+            userCanAccessGov(existing().governorateId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['centralSyncStatus', 'updatedAt'])) ||
+          (existing().status != 'approved' && (
+            (canEditInGov(existing().governorateId) &&
+              incoming().status in ['draft', 'completed'] &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])) ||
+            (canApproveInGov(existing().governorateId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'rejectionReason', 'centralSyncStatus', 'updatedAt']))
+          ))
+        );
+      allow delete: if isValidId(reportId) && isActiveCaller() && (
+        isAdmin() ||
+        (existing().status != 'approved' && canClearDayInGov(existing().governorateId))
+      );
+    }
+
+    // Daily Disbursements (Governorate-scoped + Atomic parent report guarantee)
+    match /daily_disbursements/{disbursementId} {
+      allow get: if isValidId(disbursementId) && isActiveCaller() && userCanAccessGov(existing().governorateId);
+      allow list: if isUnrestrictedGovCaller() || (
+        isActiveCaller() &&
+        userCanAccessGov(resource.data.governorateId)
+      );
+      allow create: if isValidId(disbursementId) && isActiveCaller() && isValidDailyDisbursement(incoming()) &&
+        canEditInGov(incoming().governorateId) &&
+        incoming().createdByUid == request.auth.uid &&
+        (!('updatedAt' in incoming()) || incoming().updatedAt == request.time) &&
+        existsAfter(/databases/$(database)/documents/daily_reports/$(incoming().reportId));
+      allow update: if isValidId(disbursementId) && isActiveCaller() && isValidDailyDisbursement(incoming()) &&
+        incoming().reportId == existing().reportId &&
+        incoming().governorateId == existing().governorateId &&
+        incoming().associationId == existing().associationId &&
+        incoming().fertilizerCode == existing().fertilizerCode &&
+        incoming().createdByUid == existing().createdByUid &&
+        (!('updatedAt' in incoming()) || incoming().updatedAt == request.time) && (
+          isAdmin() ||
+          (canEditInGov(existing().governorateId) &&
+            (!exists(/databases/$(database)/documents/daily_reports/$(existing().reportId)) ||
+              get(/databases/$(database)/documents/daily_reports/$(existing().reportId)).data.status != 'approved') &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['openingBalance', 'closingBalance', 'settlementQty', 'actualDisbursed', 'variance', 'varianceReason', 'updatedAt']))
+        );
+      allow delete: if isValidId(disbursementId) && isActiveCaller() && (
+        isAdmin() ||
+        (canClearDayInGov(existing().governorateId) &&
+          (!exists(/databases/$(database)/documents/daily_reports/$(existing().reportId)) ||
+            get(/databases/$(database)/documents/daily_reports/$(existing().reportId)).data.status != 'approved'))
+      );
+    }
+
+    // Tractor Deliveries (Governorate-scoped)
+    match /tractor_deliveries/{deliveryId} {
+      allow get: if isValidId(deliveryId) && isActiveCaller() && userCanAccessGov(existing().governorateId);
+      allow list: if isUnrestrictedGovCaller() || (
+        isActiveCaller() &&
+        userCanAccessGov(resource.data.governorateId)
+      );
+      allow create: if isValidId(deliveryId) && isActiveCaller() && isValidTractorDelivery(incoming()) &&
+        canEditInGov(incoming().governorateId) &&
+        incoming().createdByUid == request.auth.uid &&
+        (!('createdAt' in incoming()) || incoming().createdAt == request.time);
+      allow update: if isValidId(deliveryId) && isActiveCaller() && isValidTractorDelivery(incoming()) &&
+        incoming().governorateId == existing().governorateId &&
+        incoming().createdByUid == existing().createdByUid && (
+          isAdmin() ||
+          (existing().approvalState != 'final_approved' && (
+            (canEditInGov(existing().governorateId) &&
+              incoming().approvalState == existing().approvalState &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['actualBags', 'bagVariance', 'inspectionStatus', 'notes'])) ||
+            (canApproveInGov(existing().governorateId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['approvalState', 'actualBags', 'bagVariance', 'inspectionStatus', 'notes']))
+          ))
+        );
+      allow delete: if isValidId(deliveryId) && isActiveCaller() && (
+        isAdmin() ||
+        (hasUserDoc() &&
+          userDoc().role == 'supervisor' &&
+          existing().approvalState != 'final_approved' &&
+          userCanAccessGov(existing().governorateId))
+      );
+    }
+
+    // Approvals Audit Trail (Governorate-scoped)
+    match /approvals/{approvalId} {
+      allow get: if isValidId(approvalId) && isActiveCaller() && userCanAccessGov(existing().governorateId);
+      allow list: if isUnrestrictedGovCaller() || (
+        isActiveCaller() &&
+        userCanAccessGov(resource.data.governorateId)
+      );
+      allow create: if isValidId(approvalId) && isActiveCaller() && isValidApprovalRecord(incoming()) &&
+        canApproveInGov(incoming().governorateId) &&
+        incoming().actorUid == request.auth.uid &&
+        (!('createdAt' in incoming()) || incoming().createdAt == request.time);
+      allow update, delete: if false;
+    }
+
+    // Integration Logs (Governorate-scoped)
+    match /integration_logs/{logId} {
+      allow get: if isValidId(logId) && isActiveCaller() && userCanAccessGov(existing().governorateId);
+      allow list: if isUnrestrictedGovCaller() || (
+        isActiveCaller() &&
+        userCanAccessGov(resource.data.governorateId)
+      );
+      allow create: if isValidId(logId) && isActiveCaller() && isValidIntegrationLog(incoming()) &&
+        (isAdmin() || isChief() || canApproveInGov(incoming().governorateId)) &&
+        incoming().dispatchedByUid == request.auth.uid &&
+        (!('createdAt' in incoming()) || incoming().createdAt == request.time);
+      allow update, delete: if false;
+    }
+
+    // Image OCR Attachments (Governorate-scoped)
+    match /images_attachments/{attachmentId} {
+      allow get: if isValidId(attachmentId) && isActiveCaller() && userCanAccessGov(existing().governorateId);
+      allow list: if isUnrestrictedGovCaller() || (
+        isActiveCaller() &&
+        userCanAccessGov(resource.data.governorateId)
+      );
+      allow create: if isValidId(attachmentId) && isActiveCaller() && isValidImageAttachment(incoming()) &&
+        canEditInGov(incoming().governorateId) &&
+        incoming().analyzedByUid == request.auth.uid &&
+        (!('createdAt' in incoming()) || incoming().createdAt == request.time);
+      allow update: if false;
+      allow delete: if isValidId(attachmentId) && isAdmin();
+    }
+
+    // Agricultural Associations (Governorate-scoped; soft-deactivate only — NO hard deletes)
+    match /agricultural_associations/{associationId} {
+      allow get: if isValidId(associationId) && isActiveCaller() && userCanAccessGov(existing().governorateId);
+      allow list: if isUnrestrictedGovCaller() || (
+        isActiveCaller() &&
+        userCanAccessGov(resource.data.governorateId)
+      );
+      allow create: if isValidId(associationId) && isActiveCaller() && isValidAssociation(incoming()) &&
+        canManageAssociationsInGov(incoming().governorateId) &&
+        (!('createdByUid' in incoming()) || incoming().createdByUid == request.auth.uid);
+      allow update: if isValidId(associationId) && isActiveCaller() && isValidAssociation(incoming()) &&
+        incoming().governorateId == existing().governorateId &&
+        canManageAssociationsInGov(existing().governorateId) && (
+          isAdmin() ||
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'code', 'nameAr', 'normalizedName', 'centerId', 'villageId',
+            'managerName', 'managerPhone', 'supervisionType', 'distributionDay',
+            'capacity', 'notes', 'sortOrder', 'isActive', 'active', 'updatedAt'
+          ])
+        );
+      allow delete: if false;
+    }
+
+    // Per-governorate normalized name uniqueness locks
+    match /association_name_locks/{lockId} {
+      allow get: if isValidId(lockId) && isActiveCaller() && (
+        resource == null || userCanAccessGov(resource.data.governorateId)
+      );
+      allow list: if false;
+      allow create: if isValidId(lockId) && isActiveCaller() && isValidAssociationNameLock(incoming()) &&
+        canManageAssociationsInGov(incoming().governorateId) &&
+        (!('createdByUid' in incoming()) || incoming().createdByUid == request.auth.uid);
+      allow update: if isValidId(lockId) && isActiveCaller() && isValidAssociationNameLock(incoming()) &&
+        incoming().governorateId == existing().governorateId &&
+        canManageAssociationsInGov(existing().governorateId);
+      allow delete: if isValidId(lockId) && isActiveCaller() &&
+        canManageAssociationsInGov(existing().governorateId);
+    }
+
+    // Reference Catalogs
+    match /roles/{roleId} {
+      allow get: if isValidId(roleId) && isActiveCaller();
+      allow list: if isActiveCaller();
+      allow create, update: if isValidId(roleId) && isAdmin();
+      allow delete: if false;
+    }
+
+    match /governorates/{governorateId} {
+      allow get: if isValidId(governorateId) && isActiveCaller();
+      allow list: if isActiveCaller();
+      allow create, update: if isValidId(governorateId) && isAdmin() && isValidGovernorate(incoming());
+      allow delete: if isValidId(governorateId) && isAdmin();
+    }
+
+    match /governorate_centers/{centerId} {
+      allow get: if isValidId(centerId) && isActiveCaller();
+      allow list: if isActiveCaller();
+      allow create, update: if isValidId(centerId) && isAdmin() && isValidCenter(incoming());
+      allow delete: if isValidId(centerId) && isAdmin();
+    }
+
+    match /center_villages/{villageId} {
+      allow get: if isValidId(villageId) && isActiveCaller();
+      allow list: if isActiveCaller();
+      allow create, update: if isValidId(villageId) && isAdmin() && isValidVillage(incoming());
+      allow delete: if isValidId(villageId) && isAdmin();
+    }
+
+    match /fertilizer_types/{typeId} {
+      allow get: if isValidId(typeId) && isActiveCaller();
+      allow list: if isActiveCaller();
+      allow create, update: if isValidId(typeId) && isAdmin() && isValidFertilizerType(incoming());
+      allow delete: if isValidId(typeId) && isAdmin();
+    }
+
+    // Immutable Operational Audit Logs (Write-only for active users, Read-only for Admins)
+    match /audit_logs/{logId} {
+      allow get: if isValidId(logId) && isAdmin();
+      allow list: if isAdmin();
+      allow create: if isValidId(logId) && isActiveCaller() && isValidAuditLog(incoming()) &&
+        incoming().actorUid == request.auth.uid &&
+        (!('createdAt' in incoming()) || incoming().createdAt == request.time);
+      allow update, delete: if false;
+    }
+
+    // Global System Settings
+    match /system_settings/{settingId} {
+      allow get: if isValidId(settingId) && isActiveCaller();
+      allow list: if false;
+      allow create: if isValidId(settingId) && isAdmin() && isValidSystemSetting(incoming());
+      allow update: if isValidId(settingId) && isValidSystemSetting(incoming()) && (
+        isAdmin() ||
+        (hasPermOrRoleDefault('canManageAssociations', ['supervisor', 'admin']) &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['minThresholds', 'assocMinThresholds']))
+      );
+      allow delete: if false;
+    }
+  }
+}

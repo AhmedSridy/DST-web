@@ -1,0 +1,6 @@
+{
+  "name": "منظومة DST لإدارة ومراقبة صرف الأسمدة الزراعية",
+  "description": "منظومة مؤسسية لإدارة ومراقبة صرف الأسمدة الزراعية والجرارات والبوليصات وقراءة الكشوف بالذكاء الاصطناعي والعمل دون إنترنت.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

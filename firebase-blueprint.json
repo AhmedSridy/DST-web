@@ -1,0 +1,391 @@
+{
+  "entities": {
+    "Role": {
+      "title": "Role",
+      "description": "System role definition for RBAC",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "enum": ["field_staff", "supervisor", "chief", "admin", "viewer"], "maxLength": 32 },
+        "nameAr": { "type": "string", "maxLength": 80 },
+        "permissions": { "type": "string", "maxLength": 1000 }
+      },
+      "required": ["code", "nameAr"]
+    },
+    "Governorate": {
+      "title": "Governorate",
+      "description": "Egyptian governorate master record",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "maxLength": 20, "pattern": "^[A-Z0-9_-]+$" },
+        "nameAr": { "type": "string", "maxLength": 100 },
+        "region": { "type": "string", "maxLength": 80 },
+        "isActive": { "type": "boolean" }
+      },
+      "required": ["code", "nameAr", "isActive"]
+    },
+    "GovernorateCenter": {
+      "title": "GovernorateCenter",
+      "description": "Administrative center / district inside a governorate",
+      "type": "object",
+      "properties": {
+        "governorateId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "code": { "type": "string", "maxLength": 32 },
+        "nameAr": { "type": "string", "maxLength": 120 },
+        "isActive": { "type": "boolean" }
+      },
+      "required": ["governorateId", "code", "nameAr", "isActive"]
+    },
+    "CenterVillage": {
+      "title": "CenterVillage",
+      "description": "Village belonging to a governorate center",
+      "type": "object",
+      "properties": {
+        "governorateId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "centerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "nameAr": { "type": "string", "maxLength": 120 },
+        "isActive": { "type": "boolean" }
+      },
+      "required": ["governorateId", "centerId", "nameAr", "isActive"]
+    },
+    "AgriculturalAssociation": {
+      "title": "AgriculturalAssociation",
+      "description": "Agricultural cooperative association receiving and disbursing fertilizers",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "maxLength": 40 },
+        "nameAr": { "type": "string", "maxLength": 120 },
+        "normalizedName": { "type": "string", "maxLength": 120 },
+        "governorateId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "centerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "villageId": { "type": "string", "maxLength": 128 },
+        "managerName": { "type": "string", "maxLength": 120 },
+        "managerPhone": { "type": "string", "maxLength": 30 },
+        "supervisionType": { "type": "string", "maxLength": 80 },
+        "distributionDay": { "type": "string", "maxLength": 80 },
+        "capacity": { "type": "number" },
+        "notes": { "type": "string", "maxLength": 500 },
+        "sortOrder": { "type": "integer" },
+        "isActive": { "type": "boolean" },
+        "active": { "type": "boolean" },
+        "createdByUid": { "type": "string", "maxLength": 128 },
+        "createdByName": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["code", "nameAr", "normalizedName", "governorateId", "centerId", "isActive"]
+    },
+    "AssociationNameLock": {
+      "title": "AssociationNameLock",
+      "description": "Deterministic per-governorate association normalized name uniqueness lock",
+      "type": "object",
+      "properties": {
+        "governorateId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "normalizedName": { "type": "string", "maxLength": 120 },
+        "associationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "createdByUid": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["governorateId", "normalizedName", "associationId"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile, assigned RBAC role, scoped governorates, and granular permissions",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["field_staff", "supervisor", "chief", "admin", "viewer"], "maxLength": 32 },
+        "governorateId": { "type": "string", "maxLength": 128 },
+        "governorateIds": { "type": "array" },
+        "permissions": { "type": "object" },
+        "passwordHash": { "type": "string", "maxLength": 128 },
+        "inviteId": { "type": "string", "maxLength": 128 },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "role", "isActive"]
+    },
+    "UserInvite": {
+      "title": "UserInvite",
+      "description": "Admin-provisioned pre-authorization invite for Google account sign-in",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["field_staff", "supervisor", "chief", "admin", "viewer"], "maxLength": 32 },
+        "governorateId": { "type": "string", "maxLength": 128 },
+        "governorateIds": { "type": "array" },
+        "permissions": { "type": "object" },
+        "isActive": { "type": "boolean" },
+        "claimedUid": { "type": "string", "maxLength": 128 },
+        "createdByUid": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "displayName", "role", "governorateIds", "isActive", "createdByUid"]
+    },
+    "FertilizerType": {
+      "title": "FertilizerType",
+      "description": "Fertilizer commodity definition (Urea, Nitrate, Sulfate)",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "maxLength": 30 },
+        "nameAr": { "type": "string", "maxLength": 80 },
+        "sortOrder": { "type": "integer" },
+        "bagWeightKg": { "type": "number" },
+        "isActive": { "type": "boolean" }
+      },
+      "required": ["code", "nameAr", "sortOrder", "bagWeightKg", "isActive"]
+    },
+    "DailyReport": {
+      "title": "DailyReport",
+      "description": "Daily fertilizer disbursement & inventory sheet header per governorate and date",
+      "type": "object",
+      "properties": {
+        "governorateId": { "type": "string", "maxLength": 128 },
+        "reportDate": { "type": "string", "maxLength": 20 },
+        "status": { "type": "string", "enum": ["draft", "completed", "under_review", "approved", "rejected"], "maxLength": 32 },
+        "createdByUid": { "type": "string", "maxLength": 128 },
+        "createdByName": { "type": "string", "maxLength": 120 },
+        "rejectionReason": { "type": "string", "maxLength": 500 },
+        "centralSyncStatus": { "type": "string", "enum": ["pending", "synced", "failed"], "maxLength": 32 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["governorateId", "reportDate", "status", "createdByUid"]
+    },
+    "DailyDisbursement": {
+      "title": "DailyDisbursement",
+      "description": "Association-level daily disbursement line across fertilizer types (nullable unrecorded fields; opening - closing)",
+      "type": "object",
+      "properties": {
+        "reportId": { "type": "string", "maxLength": 128 },
+        "governorateId": { "type": "string", "maxLength": 128 },
+        "associationId": { "type": "string", "maxLength": 128 },
+        "fertilizerCode": { "type": "string", "maxLength": 32 },
+        "openingBalance": { "type": "number" },
+        "closingBalance": { "type": "number" },
+        "settlementQty": { "type": "number" },
+        "actualDisbursed": { "type": "number" },
+        "variance": { "type": "number" },
+        "varianceReason": { "type": "string", "maxLength": 500 },
+        "createdByUid": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["reportId", "governorateId", "associationId", "fertilizerCode", "createdByUid"]
+    },
+    "TractorDelivery": {
+      "title": "TractorDelivery",
+      "description": "Incoming fertilizer tractor shipment & inspection record",
+      "type": "object",
+      "properties": {
+        "governorateId": { "type": "string", "maxLength": 128 },
+        "centerId": { "type": "string", "maxLength": 128 },
+        "associationId": { "type": "string", "maxLength": 128 },
+        "tractorPlate": { "type": "string", "maxLength": 40 },
+        "arrivalDate": { "type": "string", "maxLength": 20 },
+        "arrivalTime": { "type": "string", "maxLength": 20 },
+        "fertilizerCode": { "type": "string", "maxLength": 32 },
+        "driverName": { "type": "string", "maxLength": 120 },
+        "driverPhone": { "type": "string", "maxLength": 30 },
+        "driverNationalId": { "type": "string", "maxLength": 20 },
+        "supplySource": { "type": "string", "maxLength": 150 },
+        "manifestNumber": { "type": "string", "maxLength": 60 },
+        "manifestBags": { "type": "integer" },
+        "actualBags": { "type": "integer" },
+        "bagVariance": { "type": "integer" },
+        "inspectionStatus": { "type": "string", "enum": ["matched", "shortage", "surplus", "damaged"], "maxLength": 32 },
+        "approvalState": { "type": "string", "enum": ["pending", "final_approved"], "maxLength": 32 },
+        "checklist": { "type": "object" },
+        "notes": { "type": "string", "maxLength": 500 },
+        "createdByUid": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["governorateId", "associationId", "tractorPlate", "arrivalDate", "fertilizerCode", "manifestNumber", "manifestBags", "actualBags", "inspectionStatus", "approvalState", "createdByUid"]
+    },
+    "ApprovalRecord": {
+      "title": "ApprovalRecord",
+      "description": "Workflow transition log for daily report review and approval",
+      "type": "object",
+      "properties": {
+        "reportId": { "type": "string", "maxLength": 128 },
+        "governorateId": { "type": "string", "maxLength": 128 },
+        "reportDate": { "type": "string", "maxLength": 20 },
+        "action": { "type": "string", "enum": ["submitted", "reviewed", "approved", "rejected", "reopened"], "maxLength": 32 },
+        "fromStatus": { "type": "string", "enum": ["draft", "completed", "under_review", "approved", "rejected"], "maxLength": 32 },
+        "toStatus": { "type": "string", "enum": ["draft", "completed", "under_review", "approved", "rejected"], "maxLength": 32 },
+        "actorUid": { "type": "string", "maxLength": 128 },
+        "actorName": { "type": "string", "maxLength": 120 },
+        "actorRole": { "type": "string", "enum": ["field_staff", "supervisor", "chief", "admin", "viewer"], "maxLength": 32 },
+        "notes": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["reportId", "governorateId", "reportDate", "action", "fromStatus", "toStatus", "actorUid", "actorRole"]
+    },
+    "IntegrationLog": {
+      "title": "IntegrationLog",
+      "description": "Central system synchronization log",
+      "type": "object",
+      "properties": {
+        "reportId": { "type": "string", "maxLength": 128 },
+        "governorateId": { "type": "string", "maxLength": 128 },
+        "reportDate": { "type": "string", "maxLength": 20 },
+        "endpointUrl": { "type": "string", "maxLength": 300 },
+        "status": { "type": "string", "enum": ["success", "failed"], "maxLength": 20 },
+        "httpStatus": { "type": "integer" },
+        "payloadSummary": { "type": "string", "maxLength": 400 },
+        "responseMessage": { "type": "string", "maxLength": 400 },
+        "dispatchedByUid": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["reportId", "governorateId", "reportDate", "endpointUrl", "status", "dispatchedByUid"]
+    },
+    "ImageAttachment": {
+      "title": "ImageAttachment",
+      "description": "Analyzed paper sheet OCR attachment metadata",
+      "type": "object",
+      "properties": {
+        "governorateId": { "type": "string", "maxLength": 128 },
+        "associationId": { "type": "string", "maxLength": 128 },
+        "associationName": { "type": "string", "maxLength": 150 },
+        "fertilizerCode": { "type": "string", "maxLength": 32 },
+        "reportDate": { "type": "string", "maxLength": 20 },
+        "extractedOpeningBalance": { "type": "number" },
+        "extractedClosingBalance": { "type": "number" },
+        "extractedSettlement": { "type": "number" },
+        "confidence": { "type": "number" },
+        "notes": { "type": "string", "maxLength": 500 },
+        "rawResponseText": { "type": "string", "maxLength": 4000 },
+        "analyzedByUid": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["governorateId", "associationId", "associationName", "fertilizerCode", "reportDate", "analyzedByUid"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "User-scoped system alert or workflow notification",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 150 },
+        "message": { "type": "string", "maxLength": 500 },
+        "severity": { "type": "string", "enum": ["info", "warning", "error", "success"], "maxLength": 20 },
+        "isRead": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "title", "message", "severity", "isRead"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable operational audit log",
+      "type": "object",
+      "properties": {
+        "actorUid": { "type": "string", "maxLength": 128 },
+        "actorEmail": { "type": "string", "maxLength": 160 },
+        "actorName": { "type": "string", "maxLength": 120 },
+        "actorRole": { "type": "string", "enum": ["field_staff", "supervisor", "chief", "admin", "viewer"], "maxLength": 32 },
+        "action": { "type": "string", "maxLength": 80 },
+        "entityType": { "type": "string", "maxLength": 60 },
+        "entityId": { "type": "string", "maxLength": 128 },
+        "details": { "type": "string", "maxLength": 1000 },
+        "oldValue": { "type": "string", "maxLength": 2000 },
+        "newValue": { "type": "string", "maxLength": 2000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["actorUid", "action", "entityType", "entityId"]
+    },
+    "SystemSetting": {
+      "title": "SystemSetting",
+      "description": "Global application configuration settings",
+      "type": "object",
+      "properties": {
+        "requireDriverNationalId": { "type": "boolean" },
+        "centralApiUrl": { "type": "string", "maxLength": 300 },
+        "autoSyncOnApproval": { "type": "boolean" },
+        "organizationNameAr": { "type": "string", "maxLength": 180 },
+        "treatEmptyAsZero": { "type": "boolean" },
+        "minThresholds": { "type": "object" },
+        "assocMinThresholds": { "type": "object" },
+        "seedVersion": { "type": "string", "maxLength": 32 }
+      },
+      "required": ["requireDriverNationalId", "centralApiUrl", "autoSyncOnApproval"]
+    }
+  },
+  "firestore": {
+    "/roles/{roleId}": {
+      "schema": { "$ref": "#/entities/Role" },
+      "description": "RBAC role definitions"
+    },
+    "/governorates/{governorateId}": {
+      "schema": { "$ref": "#/entities/Governorate" },
+      "description": "Egyptian governorates"
+    },
+    "/governorate_centers/{centerId}": {
+      "schema": { "$ref": "#/entities/GovernorateCenter" },
+      "description": "Administrative centers inside governorates"
+    },
+    "/center_villages/{villageId}": {
+      "schema": { "$ref": "#/entities/CenterVillage" },
+      "description": "Villages inside centers"
+    },
+    "/agricultural_associations/{associationId}": {
+      "schema": { "$ref": "#/entities/AgriculturalAssociation" },
+      "description": "Agricultural cooperative associations"
+    },
+    "/association_name_locks/{lockId}": {
+      "schema": { "$ref": "#/entities/AssociationNameLock" },
+      "description": "Per-governorate normalized name uniqueness lock documents"
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User profiles and RBAC roles"
+    },
+    "/user_invites/{inviteId}": {
+      "schema": { "$ref": "#/entities/UserInvite" },
+      "description": "Admin-created user invites controlling allowed Google logins"
+    },
+    "/fertilizer_types/{typeId}": {
+      "schema": { "$ref": "#/entities/FertilizerType" },
+      "description": "Fertilizer catalog"
+    },
+    "/daily_reports/{reportId}": {
+      "schema": { "$ref": "#/entities/DailyReport" },
+      "description": "Daily report headers"
+    },
+    "/daily_disbursements/{disbursementId}": {
+      "schema": { "$ref": "#/entities/DailyDisbursement" },
+      "description": "Daily disbursement rows"
+    },
+    "/tractor_deliveries/{deliveryId}": {
+      "schema": { "$ref": "#/entities/TractorDelivery" },
+      "description": "Tractor deliveries and manifest inspections"
+    },
+    "/approvals/{approvalId}": {
+      "schema": { "$ref": "#/entities/ApprovalRecord" },
+      "description": "Daily report approval workflow trail"
+    },
+    "/integration_logs/{logId}": {
+      "schema": { "$ref": "#/entities/IntegrationLog" },
+      "description": "Central API synchronization log"
+    },
+    "/images_attachments/{attachmentId}": {
+      "schema": { "$ref": "#/entities/ImageAttachment" },
+      "description": "OCR image attachment analysis history"
+    },
+    "/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/Notification" },
+      "description": "User notifications"
+    },
+    "/audit_logs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Immutable audit trail"
+    },
+    "/system_settings/{settingId}": {
+      "schema": { "$ref": "#/entities/SystemSetting" },
+      "description": "System-wide configuration"
+    }
+  }
+}

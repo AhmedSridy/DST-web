@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <rect width="512" height="512" rx="96" fill="#065F46"/>
+  <rect x="28" y="28" width="456" height="456" rx="74" stroke="#34D399" stroke-opacity="0.35" stroke-width="6"/>
+  <path d="M256 96C198 154 164 218 164 282C164 338 205 384 256 384C307 384 348 338 348 282C348 218 314 154 256 96Z" fill="#10B981" fill-opacity="0.22" stroke="#ECFDF5" stroke-width="14" stroke-linejoin="round"/>
+  <path d="M256 144V372" stroke="#ECFDF5" stroke-width="12" stroke-linecap="round"/>
+  <path d="M256 220L206 184M256 268L200 230M256 316L208 282" stroke="#A7F3D0" stroke-width="11" stroke-linecap="round"/>
+  <path d="M256 220L306 184M256 268L312 230M256 316L304 282" stroke="#A7F3D0" stroke-width="11" stroke-linecap="round"/>
+  <rect x="136" y="400" width="240" height="46" rx="10" fill="#ECFDF5"/>
+  <text x="256" y="432" text-anchor="middle" font-family="Arial, sans-serif" font-weight="800" font-size="28" fill="#064E3B" letter-spacing="3">DST</text>
+</svg>
