@@ -1,6 +1,7 @@
 import {
   collection,
   deleteDoc,
+  deleteField,
   doc,
   getDoc,
   getDocs,
@@ -216,10 +217,11 @@ async function commitBatchedWrites(
 }
 
 function sanitizeSystemSettingsForRule(settings: Partial<SystemSettings> & { seedVersion?: string }) {
+  const cleanUrl = sanitizeExtractedText(settings.centralApiUrl || '').trim();
   return stripUndefined({
     requireDriverNationalId: Boolean(settings.requireDriverNationalId),
-    centralApiUrl: sanitizeExtractedText(settings.centralApiUrl || SEED_SYSTEM_SETTINGS.centralApiUrl),
-    autoSyncOnApproval: Boolean(settings.autoSyncOnApproval),
+    centralApiUrl: cleanUrl,
+    autoSyncOnApproval: cleanUrl ? Boolean(settings.autoSyncOnApproval) : false,
     organizationNameAr: sanitizeExtractedText(
       settings.organizationNameAr || SEED_SYSTEM_SETTINGS.organizationNameAr,
     ),
@@ -1223,15 +1225,23 @@ export async function saveDisbursementsBatchFs(
       where('reportId', '==', reportId),
     ),
   );
-  const existingRowCreator = new Map<string, string>();
+  const existingRowMeta = new Map<string, { id: string; createdByUid: string }>();
   for (const d of existingRowsSnap.docs) {
-    existingRowCreator.set(d.id, String(d.data().createdByUid || actor.uid));
+    const data = d.data();
+    const key = `${String(data.associationId || '')}::${String(data.fertilizerCode || '')}`;
+    existingRowMeta.set(key, {
+      id: d.id,
+      createdByUid: String(data.createdByUid || actor.uid),
+    });
   }
 
   for (const r of params.rows) {
     const calc = computeDisbursementRow(r, params.treatEmptyAsZero);
-    const rowId = `disb-${reportId}-${r.associationId}-${r.fertilizerCode}`;
-    const creatorUid = existingRowCreator.get(rowId) || actor.uid;
+    const key = `${r.associationId}::${r.fertilizerCode}`;
+    const existingMeta = existingRowMeta.get(key);
+    // Preserve existing legacy doc ID on update; enforce deterministic `{reportId}_{associationId}_{fertilizerCode}` on create.
+    const rowId = existingMeta ? existingMeta.id : `${reportId}_${r.associationId}_${r.fertilizerCode}`;
+    const creatorUid = existingMeta ? existingMeta.createdByUid : actor.uid;
     const cleanReason = sanitizeExtractedText(r.varianceReason || '');
 
     const row: DailyDisbursementRow = {
@@ -1266,7 +1276,7 @@ export async function saveDisbursementsBatchFs(
       updatedAt: serverTimestamp(),
     };
 
-    if (existingRowCreator.has(rowId)) {
+    if (existingMeta) {
       ops.push((b) => b.update(doc(db, 'daily_disbursements', rowId), firestorePayload));
     } else {
       ops.push((b) => b.set(doc(db, 'daily_disbursements', rowId), firestorePayload));
@@ -1391,9 +1401,11 @@ export async function restoreDayRecordsFs(
     );
   }
   for (const r of snapshot.rows) {
+    const targetReportId = r.reportId || reportId;
+    const deterministicId = `${targetReportId}_${r.associationId}_${r.fertilizerCode}`;
     ops.push((b) =>
-      b.set(doc(db, 'daily_disbursements', r.id), {
-        reportId: r.reportId || reportId,
+      b.set(doc(db, 'daily_disbursements', deterministicId), {
+        reportId: targetReportId,
         governorateId: snapshot.governorateId,
         associationId: r.associationId,
         fertilizerCode: r.fertilizerCode,
@@ -1653,12 +1665,9 @@ export async function deleteTractorFs(
 export async function transitionReportStatusFs(
   params: { reportId: string; nextStatus: ReportStatus; notes?: string },
   actor: UserProfile,
-  settings: SystemSettings,
-  reportDisbursements: DailyDisbursementRow[],
 ): Promise<{
   report: DailyReport;
   approval: ApprovalRecord;
-  integrationLog?: IntegrationLogEntry;
 }> {
   const reportRef = doc(db, 'daily_reports', params.reportId);
   const snap = await getDoc(reportRef);
@@ -1667,11 +1676,24 @@ export async function transitionReportStatusFs(
   }
   const data = snap.data();
   const govId = String(data.governorateId || '');
+  const reportCreatedByUid = String(data.createdByUid || '');
   if (!canAccessGovernorate(actor, govId)) {
     throw new Error('ليس لديك صلاحية على هذه المحافظة.');
   }
   const currentStatus = data.status as ReportStatus;
-  if (!canTransitionReportStatus(currentStatus, params.nextStatus, actor.role)) {
+  if (
+    params.nextStatus === 'approved' &&
+    actor.role !== 'admin' &&
+    reportCreatedByUid === actor.uid
+  ) {
+    throw new Error('لا يجوز للمستخدم اعتماد تقرير أنشأه بنفسه.');
+  }
+  if (
+    !canTransitionReportStatus(currentStatus, params.nextStatus, actor.role, {
+      actorUid: actor.uid,
+      reportCreatedByUid,
+    })
+  ) {
     throw new Error('هذا الانتقال غير مسموح به وفق دورك الوظيفي.');
   }
   const cleanNotes = sanitizeExtractedText(params.notes || '');
@@ -1679,16 +1701,7 @@ export async function transitionReportStatusFs(
     throw new Error('يجب ذكر سبب الرفض عند رفض التقرير.');
   }
 
-  const autoSync = params.nextStatus === 'approved' && settings.autoSyncOnApproval;
   const nowIso = new Date().toISOString();
-
-  await updateDoc(reportRef, {
-    status: params.nextStatus,
-    rejectionReason: params.nextStatus === 'rejected' ? cleanNotes : '',
-    centralSyncStatus: autoSync ? 'synced' : data.centralSyncStatus || 'pending',
-    updatedAt: serverTimestamp(),
-  });
-
   const actionMap: Record<ReportStatus, ApprovalRecord['action']> = {
     completed: 'submitted',
     under_review: 'reviewed',
@@ -1711,7 +1724,16 @@ export async function transitionReportStatusFs(
     notes: cleanNotes || 'تحديث مرحلة الاعتماد',
     createdAt: nowIso,
   };
-  await setDoc(
+
+  // Atomic batch linking daily_reports.lastApprovalId <-> approvals/{approvalId}
+  const batch = writeBatch(db);
+  batch.update(reportRef, {
+    status: params.nextStatus,
+    rejectionReason: params.nextStatus === 'rejected' ? cleanNotes : '',
+    lastApprovalId: approvalId,
+    updatedAt: serverTimestamp(),
+  });
+  batch.set(
     doc(db, 'approvals', approvalId),
     stripUndefined({
       ...approval,
@@ -1719,29 +1741,7 @@ export async function transitionReportStatusFs(
       createdAt: serverTimestamp(),
     }),
   );
-
-  let integrationLog: IntegrationLogEntry | undefined;
-  if (autoSync) {
-    const intId = makeDocId('int');
-    const totalDisbursed = reportDisbursements.reduce((acc, r) => acc + (r.actualDisbursed || 0), 0);
-    integrationLog = {
-      id: intId,
-      reportId: params.reportId,
-      governorateId: govId,
-      reportDate: String(data.reportDate),
-      endpointUrl: settings.centralApiUrl,
-      status: 'success',
-      httpStatus: 200,
-      payloadSummary: `${reportDisbursements.length} بند · إجمالي المنصرف ${totalDisbursed} شيكارة`,
-      responseMessage: 'تم الإرسال التلقائي للمنظومة المركزية فور الاعتماد النهائي',
-      dispatchedByUid: actor.uid,
-      createdAt: nowIso,
-    };
-    await setDoc(
-      doc(db, 'integration_logs', intId),
-      stripUndefined({ ...integrationLog, id: undefined, createdAt: serverTimestamp() }),
-    );
-  }
+  await batch.commit();
 
   await writeAuditLogFs({
     actor,
@@ -1750,7 +1750,7 @@ export async function transitionReportStatusFs(
     entityId: params.reportId,
     details: `تحويل التقرير ${params.reportId} إلى ${params.nextStatus}`,
     oldValue: { status: currentStatus },
-    newValue: { status: params.nextStatus, notes: cleanNotes },
+    newValue: { status: params.nextStatus, approvalId, notes: cleanNotes },
   });
 
   const updatedReport: DailyReport = {
@@ -1758,82 +1758,58 @@ export async function transitionReportStatusFs(
     governorateId: govId,
     reportDate: String(data.reportDate),
     status: params.nextStatus,
-    createdByUid: String(data.createdByUid),
+    createdByUid: reportCreatedByUid,
     createdByName: String(data.createdByName || ''),
     rejectionReason: params.nextStatus === 'rejected' ? cleanNotes : '',
-    centralSyncStatus: autoSync ? 'synced' : (data.centralSyncStatus as DailyReport['centralSyncStatus']),
+    lastApprovalId: approvalId,
+    centralSyncStatus: (data.centralSyncStatus || 'pending') as DailyReport['centralSyncStatus'],
     createdAt: toIsoString(data.createdAt) || nowIso,
     updatedAt: nowIso,
   };
 
-  return { report: updatedReport, approval, integrationLog };
+  return { report: updatedReport, approval };
 }
 
-export async function syncReportCentralFs(
-  reportId: string,
+/**
+ * One-time admin cleanup utility: removes legacy `passwordHash` fields from existing
+ * `users` documents via `deleteField()`. Safe to re-run (idempotent).
+ */
+export async function cleanupLegacyPasswordHashesFs(
   actor: UserProfile,
-  settings: SystemSettings,
-  reportDisbursements: DailyDisbursementRow[],
-): Promise<{ report: DailyReport; log: IntegrationLogEntry }> {
-  if (actor.role !== 'chief' && actor.role !== 'admin') {
-    throw new Error('صلاحية الإرسال للمنظومة المركزية مقصورة على رئيس القطاع أو مدير النظام.');
+): Promise<{ scanned: number; cleaned: number }> {
+  if (actor.role !== 'admin') {
+    throw new Error('صلاحية تنظيف حقول المستخدمين القديمة مقصورة على مدير النظام فقط.');
   }
-  const reportRef = doc(db, 'daily_reports', reportId);
-  const snap = await getDoc(reportRef);
-  if (!snap.exists()) {
-    throw new Error('التقرير غير موجود.');
-  }
-  const data = snap.data();
-  if (data.status !== 'approved') {
-    throw new Error('يجب اعتماد التقرير نهائيًا قبل الإرسال للمنظومة المركزية.');
-  }
-  const nowIso = new Date().toISOString();
-  await updateDoc(reportRef, {
-    centralSyncStatus: 'synced',
-    updatedAt: serverTimestamp(),
-  });
+  const snap = await getDocs(collection(db, 'users'));
+  const ops: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
+  let cleaned = 0;
 
-  const totalDisbursed = reportDisbursements.reduce((acc, r) => acc + (r.actualDisbursed || 0), 0);
-  const intId = makeDocId('int');
-  const log: IntegrationLogEntry = {
-    id: intId,
-    reportId,
-    governorateId: String(data.governorateId),
-    reportDate: String(data.reportDate),
-    endpointUrl: settings.centralApiUrl,
-    status: 'success',
-    httpStatus: 200,
-    payloadSummary: `${reportDisbursements.length} بند · إجمالي المنصرف ${totalDisbursed} شيكارة`,
-    responseMessage: 'تم توثيق وإرسال التقرير بالمنظومة المركزية بنجاح',
-    dispatchedByUid: actor.uid,
-    createdAt: nowIso,
-  };
-  await setDoc(
-    doc(db, 'integration_logs', intId),
-    stripUndefined({ ...log, id: undefined, createdAt: serverTimestamp() }),
-  );
-  await writeAuditLogFs({
-    actor,
-    action: 'SYNC_CENTRAL_SYSTEM',
-    entityType: 'integration_logs',
-    entityId: intId,
-    details: `إرسال التقرير ${reportId} إلى المنظومة المركزية`,
-  });
+  for (const d of snap.docs) {
+    const data = d.data();
+    if ('passwordHash' in data) {
+      cleaned += 1;
+      ops.push((b) =>
+        b.update(d.ref, {
+          passwordHash: deleteField(),
+          updatedAt: serverTimestamp(),
+        }),
+      );
+    }
+  }
 
-  return {
-    report: {
-      id: reportId,
-      governorateId: String(data.governorateId),
-      reportDate: String(data.reportDate),
-      status: 'approved',
-      createdByUid: String(data.createdByUid),
-      createdByName: String(data.createdByName || ''),
-      centralSyncStatus: 'synced',
-      createdAt: toIsoString(data.createdAt) || nowIso,
-      updatedAt: nowIso,
-    },
-    log,
-  };
+  if (ops.length > 0) {
+    await commitBatchedWrites(ops);
+    await writeAuditLogFs({
+      actor,
+      action: 'CLEANUP_LEGACY_PASSWORD_HASH',
+      entityType: 'users',
+      entityId: 'all',
+      details: `تنظيف حقل passwordHash القديم من ${cleaned} مستند مستخدم`,
+      newValue: { scanned: snap.docs.length, cleaned },
+    });
+  }
+
+  return { scanned: snap.docs.length, cleaned };
 }
 
 export async function saveImageAttachmentFs(
@@ -2158,8 +2134,9 @@ export async function restoreBackupSnapshotFs(
   if (payload.disbursements) {
     for (const d of payload.disbursements) {
       const govId = d.governorateId || d.reportId.split('-').slice(1, -3).join('-') || 'gov-ismailia';
+      const deterministicId = `${d.reportId}_${d.associationId}_${d.fertilizerCode}`;
       ops.push((b) =>
-        b.set(doc(db, 'daily_disbursements', d.id), {
+        b.set(doc(db, 'daily_disbursements', deterministicId), {
           reportId: d.reportId,
           governorateId: govId,
           associationId: d.associationId,
@@ -2241,7 +2218,7 @@ export async function processOfflineBatchFs(
         await deleteTractorFs(p.tractorId, p.reason, actor);
       } else if (op.operationType === 'submit_report_status') {
         const p = op.payload as { reportId: string; nextStatus: ReportStatus; notes?: string };
-        await transitionReportStatusFs(p, actor, currentSettings, []);
+        await transitionReportStatusFs(p, actor);
       }
       processedIds.push(op.id);
     } catch (err) {

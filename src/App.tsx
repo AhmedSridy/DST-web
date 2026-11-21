@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import {
   BarChart3,
   BookOpen,
@@ -26,18 +26,46 @@ import { getTodayDateIso } from './data/seedData.ts';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import { LoginView } from './components/LoginView.tsx';
 import { DashboardView } from './components/DashboardView.tsx';
-import { DailyDisbursementSheet } from './components/DailyDisbursementSheet.tsx';
-import { BalancesView } from './components/BalancesView.tsx';
-import { AnalyticsModal, type AnalyticsTabId } from './components/AnalyticsModal.tsx';
-import { AiImageAnalysisView } from './components/AiImageAnalysisView.tsx';
-import { TractorsView } from './components/TractorsView.tsx';
-import { AssociationsManagerView } from './components/AssociationsManagerView.tsx';
-import { ApprovalsAndCentralView } from './components/ApprovalsAndCentralView.tsx';
-import { ReportsCenterView } from './components/ReportsCenterView.tsx';
-import { AdminAndAuditView } from './components/AdminAndAuditView.tsx';
-import { ArabicUserGuideView } from './components/ArabicUserGuideView.tsx';
+import type { AnalyticsTabId } from './components/AnalyticsModal.tsx';
 import { OfflineStatusBar, PWAInstallButton } from './components/PwaControls.tsx';
 import { ToastContainer } from './components/ToastContainer.tsx';
+
+const DailyDisbursementSheet = lazy(() =>
+  import('./components/DailyDisbursementSheet.tsx').then((m) => ({
+    default: m.DailyDisbursementSheet,
+  })),
+);
+const BalancesView = lazy(() =>
+  import('./components/BalancesView.tsx').then((m) => ({ default: m.BalancesView })),
+);
+const AnalyticsModal = lazy(() =>
+  import('./components/AnalyticsModal.tsx').then((m) => ({ default: m.AnalyticsModal })),
+);
+const AiImageAnalysisView = lazy(() =>
+  import('./components/AiImageAnalysisView.tsx').then((m) => ({ default: m.AiImageAnalysisView })),
+);
+const TractorsView = lazy(() =>
+  import('./components/TractorsView.tsx').then((m) => ({ default: m.TractorsView })),
+);
+const AssociationsManagerView = lazy(() =>
+  import('./components/AssociationsManagerView.tsx').then((m) => ({
+    default: m.AssociationsManagerView,
+  })),
+);
+const ApprovalsAndCentralView = lazy(() =>
+  import('./components/ApprovalsAndCentralView.tsx').then((m) => ({
+    default: m.ApprovalsAndCentralView,
+  })),
+);
+const ReportsCenterView = lazy(() =>
+  import('./components/ReportsCenterView.tsx').then((m) => ({ default: m.ReportsCenterView })),
+);
+const AdminAndAuditView = lazy(() =>
+  import('./components/AdminAndAuditView.tsx').then((m) => ({ default: m.AdminAndAuditView })),
+);
+const ArabicUserGuideView = lazy(() =>
+  import('./components/ArabicUserGuideView.tsx').then((m) => ({ default: m.ArabicUserGuideView })),
+);
 import type { GranularPermissions, UserRole } from './types/domain.ts';
 import { computeLowBalanceAlerts, computeOverdueReport } from './utils/analytics.ts';
 import {
@@ -399,34 +427,51 @@ const WorkspaceShell: React.FC = () => {
 
         {/* Main Viewport */}
         <main className="flex-1 min-w-0 p-4 sm:p-6 lg:p-8 max-w-[1440px]">
-          {activeNav?.id === 'dashboard' && <DashboardView onNavigate={setActiveTab} />}
-          {activeNav?.id === 'sheet' && (
-            <DailyDisbursementSheet
-              onManageAssociations={(govId) => {
-                setAssocInitialGovId(govId);
-                setActiveTab('associations');
-              }}
-            />
-          )}
-          {activeNav?.id === 'balances' && <BalancesView />}
-          {activeNav?.id === 'tractors' && <TractorsView />}
-          {activeNav?.id === 'ai_analysis' && <AiImageAnalysisView />}
-          {activeNav?.id === 'associations' && (
-            <AssociationsManagerView initialGovId={assocInitialGovId} />
-          )}
-          {activeNav?.id === 'approvals' && <ApprovalsAndCentralView />}
-          {activeNav?.id === 'reports' && <ReportsCenterView />}
-          {activeNav?.id === 'admin' && <AdminAndAuditView />}
-          {activeNav?.id === 'guide' && <ArabicUserGuideView />}
+          <Suspense
+            fallback={
+              <div className="py-16 flex items-center justify-center">
+                <div className="text-center space-y-2">
+                  <Sprout className="w-7 h-7 text-emerald-700 mx-auto animate-pulse" />
+                  <p className="text-sm font-semibold text-slate-600 dark:text-slate-300">
+                    جارٍ تحميل الشاشة...
+                  </p>
+                </div>
+              </div>
+            }
+          >
+            {activeNav?.id === 'dashboard' && <DashboardView onNavigate={setActiveTab} />}
+            {activeNav?.id === 'sheet' && (
+              <DailyDisbursementSheet
+                onManageAssociations={(govId) => {
+                  setAssocInitialGovId(govId);
+                  setActiveTab('associations');
+                }}
+              />
+            )}
+            {activeNav?.id === 'balances' && <BalancesView />}
+            {activeNav?.id === 'tractors' && <TractorsView />}
+            {activeNav?.id === 'ai_analysis' && <AiImageAnalysisView />}
+            {activeNav?.id === 'associations' && (
+              <AssociationsManagerView initialGovId={assocInitialGovId} />
+            )}
+            {activeNav?.id === 'approvals' && <ApprovalsAndCentralView />}
+            {activeNav?.id === 'reports' && <ReportsCenterView />}
+            {activeNav?.id === 'admin' && <AdminAndAuditView />}
+            {activeNav?.id === 'guide' && <ArabicUserGuideView />}
+          </Suspense>
         </main>
       </div>
 
-      <AnalyticsModal
-        open={analyticsOpen}
-        initialTab={analyticsInitialTab}
-        activeGovernorateId={primaryGovId}
-        onClose={() => setAnalyticsOpen(false)}
-      />
+      {analyticsOpen && (
+        <Suspense fallback={null}>
+          <AnalyticsModal
+            open={analyticsOpen}
+            initialTab={analyticsInitialTab}
+            activeGovernorateId={primaryGovId}
+            onClose={() => setAnalyticsOpen(false)}
+          />
+        </Suspense>
+      )}
 
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </div>

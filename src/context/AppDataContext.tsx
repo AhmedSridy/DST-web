@@ -18,6 +18,7 @@ import {
 import {
   addBulkAssociationsFs,
   approveTractorFs,
+  cleanupLegacyPasswordHashesFs,
   clearDayRecordsFs,
   createOrUpdateUserOrInviteFs,
   createTractorFs,
@@ -33,7 +34,6 @@ import {
   saveDisbursementsBatchFs,
   saveImageAttachmentFs,
   setAssociationActiveFs,
-  syncReportCentralFs,
   transitionReportStatusFs,
   updateSystemSettingsFs,
 } from '../lib/firestoreRepo.ts';
@@ -89,7 +89,7 @@ import {
   hasGranularAccess,
   hasPermission,
 } from '../utils/rbac.ts';
-import { PREVIEW_USERS, useAuth } from './AuthContext.tsx';
+import { IS_PREVIEW_MODE_ENABLED, PREVIEW_USERS, useAuth } from './AuthContext.tsx';
 import type { ToastMessage } from '../components/ToastContainer.tsx';
 import { useOnlineStatus } from '../components/PwaControls.tsx';
 
@@ -217,7 +217,6 @@ interface AppDataContextValue extends AppDataState {
     role: UserRole;
     governorateIds?: string[];
     permissions?: GranularPermissions;
-    passwordHash?: string;
     isActive?: boolean;
   }) => Promise<void>;
   deleteUser: (uidOrInviteId: string, kind?: 'user' | 'invite') => Promise<void>;
@@ -228,12 +227,12 @@ interface AppDataContextValue extends AppDataState {
     extra?: {
       governorateIds?: string[];
       permissions?: GranularPermissions;
-      passwordHash?: string;
       displayName?: string;
       inviteId?: string;
       email?: string;
     },
   ) => Promise<void>;
+  cleanupLegacyPasswordHashes: () => Promise<{ scanned: number; cleaned: number }>;
   updateSettings: (input: Partial<SystemSettings>) => Promise<void>;
   exportBackupJson: () => string;
   restoreBackupJson: (rawJson: string) => Promise<void>;
@@ -275,7 +274,7 @@ function buildInitialSeedState(_currentUser?: UserProfile | null): AppDataState 
     settings: SEED_SYSTEM_SETTINGS,
     notifications: [],
     auditLogs: createSeedAuditLogs(today),
-    users: Object.values(PREVIEW_USERS),
+    users: IS_PREVIEW_MODE_ENABLED ? Object.values(PREVIEW_USERS) : [],
     invites: [],
   };
 }
@@ -914,7 +913,15 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const map = new Map(prev.disbursements.map((d) => [d.id, d]));
       for (const r of params.rows) {
         const calc = computeDisbursementRow(r, prev.settings.treatEmptyAsZero);
-        const rowId = `disb-${reportId}-${r.associationId}-${r.fertilizerCode}`;
+        const existingLocal = prev.disbursements.find(
+          (d) =>
+            d.reportId === reportId &&
+            d.associationId === r.associationId &&
+            d.fertilizerCode === r.fertilizerCode,
+        );
+        const rowId = existingLocal
+          ? existingLocal.id
+          : `${reportId}_${r.associationId}_${r.fertilizerCode}`;
         map.set(rowId, {
           id: rowId,
           reportId,
@@ -1236,6 +1243,66 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
     pushToast({ type: 'success', title: 'تم حذف بيانات الجرار نهائيًا' });
   };
 
+  const syncReportCentral = async (reportId: string) => {
+    const target = state.reports.find((r) => r.id === reportId);
+    if (!target || target.status !== 'approved') {
+      throw new Error('يجب اعتماد التقرير نهائيًا قبل إرساله للنظام المركزي.');
+    }
+    const cleanUrl = (state.settings.centralApiUrl || '').trim();
+    if (!cleanUrl) {
+      throw new Error('رابط واجهة التكامل المركزية غير مُعدّ في إعدادات المنظومة.');
+    }
+    if (authMode !== 'firebase' || !profile) {
+      throw new Error(
+        'الإرسال المركزي الحقيقي يتطلب تسجيل الدخول بحساب Google المعتمد وإعداد رابط HTTPS مركزي.',
+      );
+    }
+
+    const token = await getIdToken();
+    if (!token) {
+      throw new Error('تعذر الحصول على رمز التحقق للمستخدم. أعد تسجيل الدخول بحساب Google.');
+    }
+
+    const res = await fetch('/api/central/sync', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ reportId }),
+    });
+
+    const json = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      error?: string;
+      centralSyncStatus?: 'synced' | 'failed';
+      log?: IntegrationLogEntry;
+    };
+
+    if (json.log || json.centralSyncStatus) {
+      const nowIso = new Date().toISOString();
+      await commitState((prev) => ({
+        ...prev,
+        reports: prev.reports.map((r) =>
+          r.id === reportId
+            ? {
+                ...r,
+                centralSyncStatus: json.centralSyncStatus || r.centralSyncStatus,
+                updatedAt: nowIso,
+              }
+            : r,
+        ),
+        integrationLogs: json.log ? [json.log, ...prev.integrationLogs] : prev.integrationLogs,
+      }));
+    }
+
+    if (!res.ok || !json.ok || json.centralSyncStatus !== 'synced') {
+      throw new Error(json.error || `فشل الإرسال إلى الخادم المركزي (${res.status}).`);
+    }
+
+    pushToast({ type: 'success', title: 'تم الإرسال للمنظومة المركزية بنجاح' });
+  };
+
   const transitionReportStatus = async (
     reportId: string,
     nextStatus: ReportStatus,
@@ -1244,35 +1311,55 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
     if (!profile) return;
     const target = state.reports.find((r) => r.id === reportId);
     if (!target) throw new Error('التقرير غير موجود. احفظ الكشف أولًا.');
-    if (!canTransitionReportStatus(target.status, nextStatus, profile.role)) {
+    if (
+      nextStatus === 'approved' &&
+      profile.role !== 'admin' &&
+      target.createdByUid === profile.uid
+    ) {
+      throw new Error('لا يجوز للمستخدم اعتماد تقرير أنشأه بنفسه.');
+    }
+    if (
+      !canTransitionReportStatus(target.status, nextStatus, profile.role, {
+        actorUid: profile.uid,
+        reportCreatedByUid: target.createdByUid,
+      })
+    ) {
       throw new Error('هذا الانتقال غير مسموح به وفق دورك الوظيفي.');
     }
     if (nextStatus === 'rejected' && !sanitizeExtractedText(notes || '')) {
       throw new Error('يجب ذكر سبب الرفض عند رفض التقرير.');
     }
 
-    const reportRows = state.disbursements.filter((d) => d.reportId === reportId);
-
     if (authMode === 'firebase') {
       if (!isOnline) {
         await enqueueOfflineOperation('submit_report_status', { reportId, nextStatus, notes });
         setOfflineQueue(await getOfflineQueue());
       } else {
-        const res = await transitionReportStatusFs(
-          { reportId, nextStatus, notes },
-          profile,
-          state.settings,
-          reportRows,
-        );
+        const res = await transitionReportStatusFs({ reportId, nextStatus, notes }, profile);
         await commitState((prev) => ({
           ...prev,
           reports: prev.reports.map((r) => (r.id === reportId ? res.report : r)),
           approvals: [res.approval, ...prev.approvals],
-          integrationLogs: res.integrationLog
-            ? [res.integrationLog, ...prev.integrationLogs]
-            : prev.integrationLogs,
         }));
         pushToast({ type: 'success', title: 'تم تحديث حالة التقرير بنجاح' });
+
+        // Trigger REAL HTTP central sync only if autoSyncOnApproval is enabled AND centralApiUrl is configured
+        if (
+          nextStatus === 'approved' &&
+          state.settings.autoSyncOnApproval &&
+          state.settings.centralApiUrl.trim()
+        ) {
+          try {
+            await syncReportCentral(reportId);
+          } catch (syncErr: unknown) {
+            pushToast({
+              type: 'warning',
+              title: 'تم الاعتماد، لكن فشل الإرسال المركزي التلقائي',
+              description:
+                syncErr instanceof Error ? syncErr.message : 'تحقق من إعدادات الرابط المركزي.',
+            });
+          }
+        }
         return;
       }
     }
@@ -1285,8 +1372,9 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
       rejected: 'rejected',
       draft: 'reopened',
     };
+    const approvalId = `app-${Date.now()}`;
     const approval: ApprovalRecord = {
-      id: `app-${Date.now()}`,
+      id: approvalId,
       reportId,
       governorateId: target.governorateId,
       reportDate: target.reportDate,
@@ -1300,24 +1388,6 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
       createdAt: now,
     };
 
-    const autoSync = nextStatus === 'approved' && state.settings.autoSyncOnApproval;
-    const totalDisbursed = reportRows.reduce((acc, r) => acc + (r.actualDisbursed || 0), 0);
-    const intLog: IntegrationLogEntry | null = autoSync
-      ? {
-          id: `int-${Date.now()}`,
-          reportId,
-          governorateId: target.governorateId,
-          reportDate: target.reportDate,
-          endpointUrl: state.settings.centralApiUrl,
-          status: 'success',
-          httpStatus: 200,
-          payloadSummary: `${reportRows.length} بند · إجمالي المنصرف ${totalDisbursed} شيكارة`,
-          responseMessage: 'تم الإرسال التلقائي للمنظومة المركزية فور الاعتماد النهائي',
-          dispatchedByUid: profile.uid,
-          createdAt: now,
-        }
-      : null;
-
     await commitState((prev) => ({
       ...prev,
       reports: prev.reports.map((r) =>
@@ -1326,13 +1396,12 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
               ...r,
               status: nextStatus,
               rejectionReason: nextStatus === 'rejected' ? sanitizeExtractedText(notes || '') : '',
-              centralSyncStatus: autoSync ? 'synced' : r.centralSyncStatus,
+              lastApprovalId: approvalId,
               updatedAt: now,
             }
           : r,
       ),
       approvals: [approval, ...prev.approvals],
-      integrationLogs: intLog ? [intLog, ...prev.integrationLogs] : prev.integrationLogs,
     }));
 
     addAuditEntryLocal(
@@ -1342,50 +1411,6 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
       `تحويل التقرير ${reportId} إلى ${nextStatus}`,
     );
     pushToast({ type: 'success', title: 'تم تحديث حالة التقرير بنجاح' });
-  };
-
-  const syncReportCentral = async (reportId: string) => {
-    const target = state.reports.find((r) => r.id === reportId);
-    if (!target || target.status !== 'approved') {
-      throw new Error('يجب اعتماد التقرير نهائيًا قبل إرساله للنظام المركزي.');
-    }
-    const reportRows = state.disbursements.filter((d) => d.reportId === reportId);
-
-    if (authMode === 'firebase' && profile) {
-      const res = await syncReportCentralFs(reportId, profile, state.settings, reportRows);
-      await commitState((prev) => ({
-        ...prev,
-        reports: prev.reports.map((r) => (r.id === reportId ? res.report : r)),
-        integrationLogs: [res.log, ...prev.integrationLogs],
-      }));
-      pushToast({ type: 'success', title: 'تم الإرسال للمنظومة المركزية بنجاح' });
-      return;
-    }
-
-    const now = new Date().toISOString();
-    const totalDisbursed = reportRows.reduce((acc, r) => acc + (r.actualDisbursed || 0), 0);
-    const log: IntegrationLogEntry = {
-      id: `int-${Date.now()}`,
-      reportId,
-      governorateId: target.governorateId,
-      reportDate: target.reportDate,
-      endpointUrl: state.settings.centralApiUrl,
-      status: 'success',
-      httpStatus: 200,
-      payloadSummary: `${reportRows.length} بند · إجمالي المنصرف ${totalDisbursed} شيكارة`,
-      responseMessage: 'تم توثيق وإرسال التقرير بالمنظومة المركزية بنجاح',
-      dispatchedByUid: profile?.uid || 'local',
-      createdAt: now,
-    };
-    await commitState((prev) => ({
-      ...prev,
-      reports: prev.reports.map((r) =>
-        r.id === reportId ? { ...r, centralSyncStatus: 'synced', updatedAt: now } : r,
-      ),
-      integrationLogs: [log, ...prev.integrationLogs],
-    }));
-    addAuditEntryLocal('SYNC_CENTRAL_SYSTEM', 'integration_logs', log.id, `إرسال التقرير ${reportId} مركزيًا`);
-    pushToast({ type: 'success', title: 'تم الإرسال للمنظومة المركزية بنجاح' });
   };
 
   const extractSheetNumbers = async (params: {
@@ -1474,7 +1499,6 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
     role: UserRole;
     governorateIds?: string[];
     permissions?: GranularPermissions;
-    passwordHash?: string;
     isActive?: boolean;
   }) => {
     const cleanEmail = sanitizeExtractedText(input.email).toLowerCase();
@@ -1516,7 +1540,6 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
       role: input.role,
       governorateIds: input.governorateIds || [],
       permissions: input.permissions || getDefaultGranularPermissions(input.role),
-      ...(input.passwordHash ? { passwordHash: input.passwordHash } : {}),
       isActive: input.isActive !== false,
       createdAt: now,
       updatedAt: now,
@@ -1528,7 +1551,6 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
         ? {
             ...existing,
             ...user,
-            passwordHash: input.passwordHash || existing.passwordHash,
             createdAt: existing.createdAt,
           }
         : user;
@@ -1586,7 +1608,6 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
     extra?: {
       governorateIds?: string[];
       permissions?: GranularPermissions;
-      passwordHash?: string;
       displayName?: string;
       inviteId?: string;
       email?: string;
@@ -1633,7 +1654,6 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
           isActive,
           governorateIds: extra?.governorateIds ?? u.governorateIds,
           permissions: extra?.permissions ?? getDefaultGranularPermissions(role),
-          ...(extra?.passwordHash ? { passwordHash: extra.passwordHash } : {}),
           updatedAt: new Date().toISOString(),
         };
         syncedUser = next;
@@ -1645,16 +1665,40 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
     pushToast({ type: 'success', title: 'تم تحديث صلاحيات المستخدم' });
   };
 
+  const cleanupLegacyPasswordHashes = async (): Promise<{ scanned: number; cleaned: number }> => {
+    if (authMode !== 'firebase' || !profile) {
+      return { scanned: state.users.length, cleaned: 0 };
+    }
+    const res = await cleanupLegacyPasswordHashesFs(profile);
+    pushToast({
+      type: 'success',
+      title: 'اكتمل فحص وتنظيف وثائق المستخدمين',
+      description:
+        res.cleaned > 0
+          ? `تمت إزالة حقل passwordHash القديم من ${res.cleaned} مستند (من أصل ${res.scanned}).`
+          : `تم فحص ${res.scanned} مستند ولم يُعثر على أي حقول passwordHash قديمة.`,
+    });
+    return res;
+  };
+
   const updateSettings = async (input: Partial<SystemSettings>) => {
+    const normalizedInput: Partial<SystemSettings> = { ...input };
+    if (typeof normalizedInput.centralApiUrl === 'string') {
+      const trimmed = normalizedInput.centralApiUrl.trim();
+      normalizedInput.centralApiUrl = trimmed;
+      if (!trimmed) {
+        normalizedInput.autoSyncOnApproval = false;
+      }
+    }
     if (authMode === 'firebase' && profile) {
-      const updated = await updateSystemSettingsFs(input, state.settings, profile);
+      const updated = await updateSystemSettingsFs(normalizedInput, state.settings, profile);
       await commitState((prev) => ({ ...prev, settings: updated }));
       pushToast({ type: 'success', title: 'تم حفظ إعدادات المنظومة' });
       return;
     }
     await commitState((prev) => ({
       ...prev,
-      settings: { ...prev.settings, ...input },
+      settings: { ...prev.settings, ...normalizedInput },
     }));
     addAuditEntryLocal(
       'UPDATE_SYSTEM_SETTINGS',
@@ -1667,7 +1711,6 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
   };
 
   const exportBackupJson = () => {
-    const safeUsers = state.users.map(({ passwordHash: _omit, ...u }) => u);
     const snapshot = {
       schemaVersion: 'dst-backup-v4',
       exportedAt: new Date().toISOString(),
@@ -1676,7 +1719,7 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
       disbursements: state.disbursements,
       tractors: state.tractors,
       settings: state.settings,
-      users: safeUsers,
+      users: state.users,
       invites: state.invites,
     };
     return JSON.stringify(snapshot, null, 2);
@@ -1764,6 +1807,7 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
       createOrUpdateUser,
       deleteUser,
       updateUserRole,
+      cleanupLegacyPasswordHashes,
       updateSettings,
       exportBackupJson,
       restoreBackupJson,

@@ -1,6 +1,5 @@
 import React, { useMemo, useState } from 'react';
 import { Download, Printer } from 'lucide-react';
-import * as XLSX from 'xlsx';
 import { useAppData } from '../context/AppDataContext.tsx';
 import { useAuth } from '../context/AuthContext.tsx';
 import { formatNumberAr } from '../utils/calculations.ts';
@@ -18,6 +17,7 @@ export const ReportsCenterView: React.FC = () => {
 
   const [filterGov, setFilterGov] = useState('all');
   const [onlyVariances, setOnlyVariances] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   const enrichedRows = useMemo(() => {
     const visibleSet = new Set(visibleGovs.map((g) => g.id));
@@ -58,7 +58,7 @@ export const ReportsCenterView: React.FC = () => {
     };
   }, [enrichedRows]);
 
-  const handleExport = () => {
+  const handleExport = async () => {
     if (!canExport) {
       pushToast({
         type: 'warning',
@@ -67,29 +67,86 @@ export const ReportsCenterView: React.FC = () => {
       });
       return;
     }
-    const data = enrichedRows.map((r) => ({
-      المحافظة: r.govName,
-      التاريخ: r.reportDate,
-      كود_الجمعية: r.assocCode,
-      الجمعية: r.assocName,
-      الصنف: r.fertName,
-      بداية_اليوم: r.openingBalance ?? '',
-      نهاية_اليوم: r.closingBalance ?? '',
-      المنصرف: r.actualDisbursed ?? '',
-      التسوية: r.settlementQty ?? '',
-      فرق_التسوية: r.variance ?? '',
-      الحالة:
-        r.variance === null
-          ? 'غير مكتمل'
-          : Math.abs(r.variance) <= 0.001
-            ? '✔ مطابق'
-            : '⚠ اختلاف',
-      السبب: r.varianceReason,
-    }));
-    const ws = XLSX.utils.json_to_sheet(data);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'تقرير إحصائي');
-    XLSX.writeFile(wb, `DST-Report-${filterGov}.xlsx`);
+
+    setExporting(true);
+    try {
+      const ExcelJS = (await import('exceljs')).default;
+      const wb = new ExcelJS.Workbook();
+      wb.creator = 'منظومة DST';
+      wb.created = new Date();
+
+      const ws = wb.addWorksheet('تقرير إحصائي', {
+        views: [{ rightToLeft: true, state: 'frozen', ySplit: 1 }],
+      });
+
+      ws.columns = [
+        { header: 'المحافظة', key: 'govName', width: 18 },
+        { header: 'التاريخ', key: 'reportDate', width: 14 },
+        { header: 'كود الجمعية', key: 'assocCode', width: 14 },
+        { header: 'الجمعية', key: 'assocName', width: 28 },
+        { header: 'الصنف', key: 'fertName', width: 12 },
+        { header: 'بداية اليوم', key: 'openingBalance', width: 14 },
+        { header: 'نهاية اليوم', key: 'closingBalance', width: 14 },
+        { header: 'المنصرف', key: 'actualDisbursed', width: 14 },
+        { header: 'التسوية', key: 'settlementQty', width: 14 },
+        { header: 'فرق التسوية', key: 'variance', width: 14 },
+        { header: 'الحالة', key: 'status', width: 14 },
+        { header: 'السبب', key: 'varianceReason', width: 26 },
+      ];
+
+      const headerRow = ws.getRow(1);
+      headerRow.font = { name: 'Cairo', size: 11, bold: true, color: { argb: 'FFFFFFFF' } };
+      headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF065F46' } };
+      headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
+      headerRow.height = 24;
+
+      for (const r of enrichedRows) {
+        const statusLabel =
+          r.variance === null
+            ? 'غير مكتمل'
+            : Math.abs(r.variance) <= 0.001
+              ? '✔ مطابق'
+              : '⚠ اختلاف';
+        const row = ws.addRow({
+          govName: r.govName,
+          reportDate: r.reportDate,
+          assocCode: r.assocCode,
+          assocName: r.assocName,
+          fertName: r.fertName,
+          openingBalance: r.openingBalance ?? '',
+          closingBalance: r.closingBalance ?? '',
+          actualDisbursed: r.actualDisbursed ?? '',
+          settlementQty: r.settlementQty ?? '',
+          variance: r.variance ?? '',
+          status: statusLabel,
+          varianceReason: r.varianceReason || '',
+        });
+        row.font = { name: 'Cairo', size: 10 };
+        row.alignment = { vertical: 'middle', horizontal: 'center' };
+        row.getCell('assocName').alignment = { vertical: 'middle', horizontal: 'right' };
+        row.getCell('govName').alignment = { vertical: 'middle', horizontal: 'right' };
+      }
+
+      const buffer = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buffer], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `DST-Report-${filterGov}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+      pushToast({ type: 'success', title: 'تم تصدير التقرير الإحصائي بصيغة Excel بنجاح' });
+    } catch (error: unknown) {
+      pushToast({
+        type: 'error',
+        title: 'تعذر تصدير التقرير',
+        description: error instanceof Error ? error.message : 'حدث خطأ أثناء إنشاء ملف Excel.',
+      });
+    } finally {
+      setExporting(false);
+    }
   };
 
   return (
@@ -107,11 +164,12 @@ export const ReportsCenterView: React.FC = () => {
           {canExport && (
             <button
               type="button"
-              onClick={handleExport}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-700 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-800"
+              disabled={exporting}
+              onClick={() => void handleExport()}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-700 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-800 disabled:opacity-60"
             >
               <Download className="w-4 h-4" />
-              تصدير Excel
+              {exporting ? 'جارٍ التصدير...' : 'تصدير Excel'}
             </button>
           )}
           <button

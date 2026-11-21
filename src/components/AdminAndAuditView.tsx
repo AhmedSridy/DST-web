@@ -5,11 +5,11 @@ import {
   Download,
   Edit3,
   History,
-  KeyRound,
   Plus,
   Save,
   Settings,
   ShieldAlert,
+  Sparkles,
   Trash2,
   Upload,
   Users,
@@ -19,7 +19,6 @@ import { useAppData } from '../context/AppDataContext.tsx';
 import { useAuth } from '../context/AuthContext.tsx';
 import { getTodayDateIso } from '../data/seedData.ts';
 import type { GranularPermissions, UserInvite, UserProfile, UserRole } from '../types/domain.ts';
-import { sha256Hex } from '../utils/crypto.ts';
 import { getDefaultGranularPermissions, ROLE_LABELS_AR } from '../utils/rbac.ts';
 import { ConfirmDialog } from './ConfirmDialog.tsx';
 
@@ -42,7 +41,6 @@ interface UserFormState {
   role: UserRole;
   governorateIds: string[];
   permissions: GranularPermissions;
-  password: string;
   isActive: boolean;
 }
 
@@ -61,6 +59,7 @@ export const AdminAndAuditView: React.FC = () => {
     createOrUpdateUser,
     deleteUser,
     updateUserRole,
+    cleanupLegacyPasswordHashes,
     updateSettings,
     exportBackupJson,
     restoreBackupJson,
@@ -75,6 +74,7 @@ export const AdminAndAuditView: React.FC = () => {
   const [centralApiUrl, setCentralApiUrl] = useState(settings.centralApiUrl);
   const [autoSync, setAutoSync] = useState(settings.autoSyncOnApproval);
   const [auditSearch, setAuditSearch] = useState('');
+  const [cleaningLegacy, setCleaningLegacy] = useState(false);
 
   const [userForm, setUserForm] = useState<UserFormState | null>(null);
   const [savingUser, setSavingUser] = useState(false);
@@ -117,14 +117,23 @@ export const AdminAndAuditView: React.FC = () => {
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
+    const trimmedUrl = centralApiUrl.trim();
+    if (trimmedUrl && !trimmedUrl.startsWith('https://')) {
+      pushToast({
+        type: 'error',
+        title: 'رابط غير آمن',
+        description: 'يجب أن يبدأ رابط واجهة التكامل المركزية ببروتوكول https:// الآمن فقط.',
+      });
+      return;
+    }
     try {
       await updateSettings({
         organizationNameAr:
           organizationNameAr.trim() || 'منظومة DST لإدارة ومراقبة صرف الأسمدة الزراعية',
         treatEmptyAsZero,
         requireDriverNationalId: requireNationalId,
-        centralApiUrl,
-        autoSyncOnApproval: autoSync,
+        centralApiUrl: trimmedUrl,
+        autoSyncOnApproval: trimmedUrl ? autoSync : false,
       });
     } catch (error: unknown) {
       pushToast({
@@ -135,6 +144,21 @@ export const AdminAndAuditView: React.FC = () => {
     }
   };
 
+  const handleCleanupLegacyPasswordHashes = async () => {
+    setCleaningLegacy(true);
+    try {
+      await cleanupLegacyPasswordHashes();
+    } catch (error: unknown) {
+      pushToast({
+        type: 'error',
+        title: 'تعذر تنفيذ التنظيف',
+        description: error instanceof Error ? error.message : 'تحقق من صلاحيات المدير.',
+      });
+    } finally {
+      setCleaningLegacy(false);
+    }
+  };
+
   const openCreateUserModal = () => {
     setUserForm({
       displayName: '',
@@ -142,7 +166,6 @@ export const AdminAndAuditView: React.FC = () => {
       role: 'field_staff',
       governorateIds: ['gov-ismailia'],
       permissions: getDefaultGranularPermissions('field_staff'),
-      password: '',
       isActive: true,
     });
   };
@@ -161,7 +184,6 @@ export const AdminAndAuditView: React.FC = () => {
       role: u.role,
       governorateIds: govIds,
       permissions: u.permissions || getDefaultGranularPermissions(u.role),
-      password: '',
       isActive: u.isActive,
     });
   };
@@ -174,7 +196,6 @@ export const AdminAndAuditView: React.FC = () => {
       role: inv.role,
       governorateIds: inv.governorateIds || [],
       permissions: inv.permissions || getDefaultGranularPermissions(inv.role),
-      password: '',
       isActive: inv.isActive,
     });
   };
@@ -203,10 +224,6 @@ export const AdminAndAuditView: React.FC = () => {
 
     setSavingUser(true);
     try {
-      const passwordHash =
-        authMode === 'preview' && userForm.password.trim()
-          ? await sha256Hex(userForm.password.trim())
-          : undefined;
       await createOrUpdateUser({
         uid: userForm.uid,
         inviteId: userForm.inviteId,
@@ -215,7 +232,6 @@ export const AdminAndAuditView: React.FC = () => {
         role: userForm.role,
         governorateIds: userForm.governorateIds,
         permissions: userForm.permissions,
-        passwordHash,
         isActive: userForm.isActive,
       });
       setUserForm(null);
@@ -586,33 +602,59 @@ export const AdminAndAuditView: React.FC = () => {
               />
             </label>
 
-            <label className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 dark:border-slate-700 p-3 cursor-pointer">
+            <label className="block space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-slate-700 dark:text-slate-300">
+                  رابط واجهة التكامل المركزية (HTTPS API)
+                </span>
+                <span
+                  className={`text-[11px] font-bold ${
+                    centralApiUrl.trim()
+                      ? 'text-emerald-700 dark:text-emerald-400'
+                      : 'text-amber-700 dark:text-amber-400'
+                  }`}
+                >
+                  {centralApiUrl.trim() ? '✔ مُعدّ' : 'غير مُعدّ'}
+                </span>
+              </div>
+              <input
+                type="url"
+                value={centralApiUrl}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setCentralApiUrl(val);
+                  if (!val.trim()) setAutoSync(false);
+                }}
+                placeholder="https://api.example.gov.eg/v1/fertilizer-reports"
+                dir="ltr"
+                className="w-full rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 px-3 py-2 font-mono-num text-left"
+              />
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                اتركه فارغًا إذا لم تتوفر خدمة مركزية فعلية. يُقبل بروتوكول HTTPS العام فقط (ممنوع localhost والعناوين الخاصة).
+              </p>
+            </label>
+
+            <label
+              className={`flex items-center justify-between gap-3 rounded-lg border border-slate-200 dark:border-slate-700 p-3 ${
+                centralApiUrl.trim() ? 'cursor-pointer' : 'opacity-60 cursor-not-allowed'
+              }`}
+            >
               <div>
                 <p className="font-bold text-slate-900 dark:text-slate-100">
                   مزامنة تلقائية عند الاعتماد النهائي
                 </p>
                 <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                  إرسال التقرير تلقائيًا إلى المنظومة المركزية فور اعتماد رئيس القطاع
+                  {centralApiUrl.trim()
+                    ? 'إرسال طلب HTTP فعلي تلقائيًا إلى المنظومة المركزية فور اعتماد رئيس القطاع'
+                    : 'معطّل لأن رابط واجهة التكامل المركزية غير مُعدّ حاليًا'}
                 </p>
               </div>
               <input
                 type="checkbox"
-                checked={autoSync}
+                disabled={!centralApiUrl.trim()}
+                checked={Boolean(centralApiUrl.trim()) && autoSync}
                 onChange={(e) => setAutoSync(e.target.checked)}
-                className="w-4 h-4 accent-emerald-700"
-              />
-            </label>
-
-            <label className="block space-y-1">
-              <span className="font-bold text-slate-700 dark:text-slate-300">
-                رابط واجهة التكامل المركزية (API)
-              </span>
-              <input
-                type="url"
-                value={centralApiUrl}
-                onChange={(e) => setCentralApiUrl(e.target.value)}
-                dir="ltr"
-                className="w-full rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 px-3 py-2 font-mono-num text-left"
+                className="w-4 h-4 accent-emerald-700 disabled:cursor-not-allowed"
               />
             </label>
 
@@ -624,6 +666,27 @@ export const AdminAndAuditView: React.FC = () => {
               حفظ إعدادات المنظومة
             </button>
           </form>
+
+          {/* One-time Admin Security Maintenance */}
+          {authMode === 'firebase' && profile?.role === 'admin' && (
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl p-5 space-y-2.5 text-xs">
+              <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                صيانة أمان وثائق المستخدمين
+              </h3>
+              <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed">
+                أداة تشغيل لمرة واحدة لإزالة أي حقل <code className="font-mono-num">passwordHash</code> قديم من مستندات <code className="font-mono-num">users</code> عبر <code className="font-mono-num">deleteField()</code>.
+              </p>
+              <button
+                type="button"
+                disabled={cleaningLegacy}
+                onClick={() => void handleCleanupLegacyPasswordHashes()}
+                className="w-full inline-flex items-center justify-center gap-1.5 rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 font-bold text-amber-950 dark:text-amber-200 hover:bg-amber-100 dark:hover:bg-amber-900/50 disabled:opacity-60"
+              >
+                <Sparkles className="w-4 h-4" />
+                {cleaningLegacy ? 'جارٍ فحص وتنظيف الوثائق...' : 'تنظيف حقل passwordHash القديم من المستخدمين'}
+              </button>
+            </div>
+          )}
 
           {/* JSON Backup & Restore */}
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl p-5 space-y-3 text-xs">
@@ -813,23 +876,6 @@ export const AdminAndAuditView: React.FC = () => {
                   ))}
                 </select>
               </label>
-
-              {authMode === 'preview' && (
-                <label className="space-y-1">
-                  <span className="font-bold text-slate-700 dark:text-slate-300 inline-flex items-center gap-1">
-                    <KeyRound className="w-3.5 h-3.5" />
-                    {userForm.uid ? 'كلمة مرور محلية جديدة (اختياري)' : 'كلمة مرور محلية (اختياري)'}
-                  </span>
-                  <input
-                    type="password"
-                    dir="ltr"
-                    value={userForm.password}
-                    onChange={(e) => setUserForm({ ...userForm, password: e.target.value })}
-                    placeholder={userForm.uid ? 'اتركه فارغًا دون تغيير' : 'لتسجيل الدخول المحلي'}
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 px-3 py-2 text-left"
-                  />
-                </label>
-              )}
             </div>
 
             {/* Granular Permissions */}

@@ -81,11 +81,32 @@ test('Granular permissions and governorate scope restrict restricted users clean
   assert.equal(canAccessGovernorate(adminUser, 'gov-suez'), true);
 });
 
-test('Report workflow transitions enforce multi-stage approval chain', () => {
+test('Report workflow transitions enforce multi-stage approval chain and forbid non-admin self-approval', () => {
   assert.equal(canTransitionReportStatus('draft', 'completed', 'field_staff'), true);
   assert.equal(canTransitionReportStatus('draft', 'approved', 'field_staff'), false);
   assert.equal(canTransitionReportStatus('completed', 'under_review', 'supervisor'), true);
   assert.equal(canTransitionReportStatus('under_review', 'approved', 'chief'), true);
+  assert.equal(
+    canTransitionReportStatus('under_review', 'approved', 'chief', {
+      actorUid: 'chief-1',
+      reportCreatedByUid: 'chief-1',
+    }),
+    false,
+  );
+  assert.equal(
+    canTransitionReportStatus('under_review', 'approved', 'chief', {
+      actorUid: 'chief-1',
+      reportCreatedByUid: 'staff-1',
+    }),
+    true,
+  );
+  assert.equal(
+    canTransitionReportStatus('under_review', 'approved', 'admin', {
+      actorUid: 'admin-1',
+      reportCreatedByUid: 'admin-1',
+    }),
+    true,
+  );
   assert.equal(canTransitionReportStatus('under_review', 'rejected', 'chief'), true);
   assert.equal(canTransitionReportStatus('approved', 'draft', 'chief'), false);
   assert.equal(canTransitionReportStatus('approved', 'draft', 'admin'), true);

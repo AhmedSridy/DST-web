@@ -222,6 +222,7 @@ export function canTransitionReportStatus(
   currentStatus: ReportStatus,
   nextStatus: ReportStatus,
   role: UserRole,
+  options?: { actorUid?: string; reportCreatedByUid?: string },
 ): boolean {
   if (role === 'admin') return true;
   if (currentStatus === 'approved') return false;
@@ -236,6 +237,13 @@ export function canTransitionReportStatus(
     return currentStatus === 'completed' && hasPermission(role, 'review_report');
   }
   if (nextStatus === 'approved') {
+    if (
+      options?.actorUid &&
+      options?.reportCreatedByUid &&
+      options.actorUid === options.reportCreatedByUid
+    ) {
+      return false;
+    }
     return (
       (currentStatus === 'under_review' || currentStatus === 'completed') &&
       hasPermission(role, 'approve_report')

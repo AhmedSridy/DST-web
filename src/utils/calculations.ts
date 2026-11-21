@@ -89,15 +89,24 @@ export function computeTractorMetrics(
   return { bagVariance, inspectionStatus: 'surplus' };
 }
 
-/** Standard 50kg agricultural fertilizer bag -> 20 bags per metric ton */
-export function tonsToBags(tons: number): number {
-  if (!Number.isFinite(tons) || tons < 0) return 0;
-  return Math.round(tons * 20);
+/**
+ * Converts metric tons to bags using the fertilizer's configured bagWeightKg (1000 / bagWeightKg).
+ * Returns null if bagWeightKg is missing/invalid so the caller never guesses a conversion factor.
+ */
+export function tonsToBags(tons: number, bagWeightKg: number | null | undefined): number | null {
+  if (!Number.isFinite(tons) || tons < 0) return null;
+  if (typeof bagWeightKg !== 'number' || !Number.isFinite(bagWeightKg) || bagWeightKg <= 0) {
+    return null;
+  }
+  return Math.round(tons * (1000 / bagWeightKg));
 }
 
-export function bagsToTons(bags: number): number {
-  if (!Number.isFinite(bags) || bags < 0) return 0;
-  return Number((bags / 20).toFixed(3));
+export function bagsToTons(bags: number, bagWeightKg: number | null | undefined): number | null {
+  if (!Number.isFinite(bags) || bags < 0) return null;
+  if (typeof bagWeightKg !== 'number' || !Number.isFinite(bagWeightKg) || bagWeightKg <= 0) {
+    return null;
+  }
+  return Number((bags / (1000 / bagWeightKg)).toFixed(3));
 }
 
 export function formatNumberAr(value: number | null | undefined): string {

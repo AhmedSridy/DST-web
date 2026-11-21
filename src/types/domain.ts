@@ -85,7 +85,6 @@ export interface UserProfile {
   governorateId?: string;
   governorateIds?: string[];
   permissions?: GranularPermissions;
-  passwordHash?: string;
   inviteId?: string;
   isActive: boolean;
   createdAt?: string;
@@ -140,6 +139,7 @@ export interface DailyReport {
   createdByUid: string;
   createdByName: string;
   rejectionReason?: string;
+  lastApprovalId?: string;
   centralSyncStatus: 'pending' | 'synced' | 'failed';
   createdAt: string;
   updatedAt: string;
@@ -300,7 +300,7 @@ export interface ManifestOcrExtractedData {
   matchedGovernorateId: string | null;
   associationName: string;
   matchedAssociationId: string | null;
-  fertilizerCode: FertilizerCode;
+  fertilizerCode: FertilizerCode | null;
   manifestBags: number | null;
   weightTons: number | null;
   tractorPlate: string;

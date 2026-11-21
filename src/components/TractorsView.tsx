@@ -113,9 +113,9 @@ export const TractorsView: React.FC = () => {
       }
     }
     if (data.manifestNumber) setManifestNumber(data.manifestNumber);
-    if (data.arrivalDate) setArrivalDate(data.arrivalDate);
+    setArrivalDate(data.arrivalDate || '');
     if (data.arrivalTime) setArrivalTime(data.arrivalTime);
-    if (data.fertilizerCode) setFertilizerCode(data.fertilizerCode);
+    setFertilizerCode(data.fertilizerCode || '');
     if (data.tractorPlate) setTractorPlate(data.tractorPlate);
     if (data.driverName) setDriverName(data.driverName);
     if (data.driverPhone) setDriverPhone(data.driverPhone);
@@ -141,6 +141,14 @@ export const TractorsView: React.FC = () => {
         type: 'error',
         title: 'بيانات ناقصة',
         description: 'يرجى إدخال رقم الجرار ورقم البوليصة واختيار الجمعية المستلمة.',
+      });
+      return;
+    }
+    if (!fertilizerCode.trim() || !arrivalDate.trim()) {
+      pushToast({
+        type: 'error',
+        title: 'حقول إلزامية ناقصة',
+        description: 'يجب تحديد نوع السماد وتاريخ الوصول قبل حفظ سجل الجرار.',
       });
       return;
     }
@@ -316,12 +324,18 @@ export const TractorsView: React.FC = () => {
             </label>
 
             <label className="space-y-1">
-              <span className="font-semibold text-slate-700 dark:text-slate-300">نوع السماد</span>
+              <span className="font-semibold text-slate-700 dark:text-slate-300">نوع السماد *</span>
               <select
+                required
                 value={fertilizerCode}
                 onChange={(e) => setFertilizerCode(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 px-3 py-2"
+                className={`w-full rounded-lg border px-3 py-2 dark:bg-slate-800 dark:text-slate-100 ${
+                  !fertilizerCode
+                    ? 'border-rose-400 bg-rose-50 dark:border-rose-600'
+                    : 'border-slate-300 dark:border-slate-600'
+                }`}
               >
+                <option value="">— اختر نوع السماد —</option>
                 {fertilizerTypes.map((f) => (
                   <option key={f.code} value={f.code}>
                     {f.nameAr}
@@ -355,12 +369,17 @@ export const TractorsView: React.FC = () => {
             </label>
 
             <label className="space-y-1">
-              <span className="font-semibold text-slate-700 dark:text-slate-300">تاريخ الوصول</span>
+              <span className="font-semibold text-slate-700 dark:text-slate-300">تاريخ الوصول *</span>
               <input
                 type="date"
+                required
                 value={arrivalDate}
                 onChange={(e) => setArrivalDate(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 px-3 py-2 font-mono-num"
+                className={`w-full rounded-lg border px-3 py-2 font-mono-num dark:bg-slate-800 dark:text-slate-100 ${
+                  !arrivalDate
+                    ? 'border-rose-400 bg-rose-50 dark:border-rose-600'
+                    : 'border-slate-300 dark:border-slate-600'
+                }`}
               />
             </label>
 

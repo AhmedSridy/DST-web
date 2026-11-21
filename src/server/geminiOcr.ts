@@ -13,7 +13,9 @@ import {
   sanitizeExtractedText,
 } from '../utils/arabicNormalize.ts';
 
-const OCR_MODEL = 'gemini-4-hydrogen';
+const OCR_MODEL = process.env.GEMINI_OCR_MODEL?.trim() || 'gemini-4-hydrogen';
+const ALLOWED_OCR_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const MAX_OCR_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB max decoded size
 
 export class OcrExtractionError extends Error {
   rawResponseText?: string;
@@ -86,6 +88,18 @@ function toArabicOcrError(error: unknown, rawText?: string): OcrExtractionError 
       rawText,
     );
   }
+  if (
+    raw.includes('NOT_FOUND') ||
+    raw.includes('404') ||
+    raw.toLowerCase().includes('model not found') ||
+    raw.toLowerCase().includes('is not found')
+  ) {
+    return new OcrExtractionError(
+      `نموذج القراءة الذكية المحدد (${OCR_MODEL}) غير متاح أو غير موجود. يُرجى مراجعة متغير البيئة GEMINI_OCR_MODEL.`,
+      'MODEL_NOT_FOUND',
+      rawText,
+    );
+  }
   if (raw.includes('RESOURCE_EXHAUSTED') || raw.includes('429')) {
     return new OcrExtractionError(
       'تم تجاوز حد الحصة المؤقتة لخدمة الذكاء الاصطناعي. يُرجى الانتظار دقيقة ثم إعادة المحاولة.',
@@ -129,9 +143,57 @@ function stripDataUrlPrefix(base64OrDataUrl: string): { base64: string; detected
   if (base64OrDataUrl.startsWith('data:')) {
     const [header, data] = base64OrDataUrl.split(',');
     const mimeMatch = header.match(/data:([^;]+);/);
-    return { base64: data || '', detectedMime: mimeMatch?.[1] };
+    return { base64: data || '', detectedMime: mimeMatch?.[1]?.toLowerCase() };
   }
   return { base64: base64OrDataUrl };
+}
+
+export function validateOcrImageInput(
+  imageBase64: unknown,
+  mimeType: unknown,
+): { base64: string; effectiveMime: string; decodedBytes: number } {
+  if (typeof imageBase64 !== 'string' || !imageBase64.trim()) {
+    throw new OcrExtractionError('بيانات الصورة المرسلة مفقودة أو غير صالحة.', 'UNSUPPORTED_IMAGE');
+  }
+
+  const { base64: rawBase64, detectedMime } = stripDataUrlPrefix(imageBase64.trim());
+  const base64 = rawBase64.replace(/\s+/g, '');
+  if (!base64 || base64.length < 20) {
+    throw new OcrExtractionError('بيانات الصورة المرسلة غير مكتملة أو تالفة.', 'UNSUPPORTED_IMAGE');
+  }
+
+  if (!/^[A-Za-z0-9+/=]+$/.test(base64)) {
+    throw new OcrExtractionError('ترميز الصورة (Base64) غير صالح.', 'UNSUPPORTED_IMAGE');
+  }
+
+  const providedMime = typeof mimeType === 'string' ? mimeType.trim().toLowerCase() : '';
+  const effectiveMime = detectedMime || providedMime;
+  if (!ALLOWED_OCR_MIME_TYPES.has(effectiveMime)) {
+    throw new OcrExtractionError(
+      `صيغة الصورة (${effectiveMime || 'غير محددة'}) غير مدعومة. يُسمح فقط بصور JPEG أو PNG أو WEBP.`,
+      'UNSUPPORTED_IMAGE',
+    );
+  }
+  if (providedMime && detectedMime && providedMime !== detectedMime) {
+    throw new OcrExtractionError(
+      'عدم تطابق بين نوع الصورة المعلن ونوع البيانات الفعلي. يُرجى رفع صورة صالحة.',
+      'UNSUPPORTED_IMAGE',
+    );
+  }
+
+  const decodedBuffer = Buffer.from(base64, 'base64');
+  if (decodedBuffer.byteLength === 0) {
+    throw new OcrExtractionError('بيانات الصورة فارغة بعد فك الترميز.', 'UNSUPPORTED_IMAGE');
+  }
+  if (decodedBuffer.byteLength > MAX_OCR_IMAGE_BYTES) {
+    const sizeMb = (decodedBuffer.byteLength / (1024 * 1024)).toFixed(1);
+    throw new OcrExtractionError(
+      `حجم الصورة (${sizeMb} ميجابايت) يتجاوز الحد الأقصى المسموح (5 ميجابايت بعد فك الترميز).`,
+      'IMAGE_TOO_LARGE',
+    );
+  }
+
+  return { base64, effectiveMime, decodedBytes: decodedBuffer.byteLength };
 }
 
 function sanitizeNullableNumber(val: unknown): number | null {
@@ -153,18 +215,7 @@ export async function extractSheetNumbersOcr(params: {
   sectionType: SheetSectionType;
   associations: AgriculturalAssociation[];
 }): Promise<{ rows: SheetOcrExtractedRow[]; summaryNote: string; rawResponseText: string }> {
-  const { base64, detectedMime } = stripDataUrlPrefix(params.imageBase64);
-  if (!base64 || base64.length < 20) {
-    throw new OcrExtractionError('بيانات الصورة المرسلة غير مكتملة أو تالفة.', 'UNSUPPORTED_IMAGE');
-  }
-
-  const effectiveMime = detectedMime || params.mimeType || 'image/jpeg';
-  if (!['image/jpeg', 'image/png', 'image/webp'].includes(effectiveMime)) {
-    throw new OcrExtractionError(
-      `صيغة الصورة (${effectiveMime}) غير مدعومة. يرجى استخدام JPEG أو PNG أو WEBP.`,
-      'UNSUPPORTED_IMAGE',
-    );
-  }
+  const { base64, effectiveMime } = validateOcrImageInput(params.imageBase64, params.mimeType);
 
   const ai = getAiClient();
   const assocNamesSample = params.associations
@@ -441,10 +492,7 @@ export async function analyzeSingleSheetOcr(params: {
   notes: string;
   rawResponseText: string;
 }> {
-  const { base64, detectedMime } = stripDataUrlPrefix(params.imageBase64);
-  if (!base64 || base64.length < 20) {
-    throw new OcrExtractionError('بيانات صورة الكشف الفردي غير صالحة.', 'UNSUPPORTED_IMAGE');
-  }
+  const { base64, effectiveMime } = validateOcrImageInput(params.imageBase64, params.mimeType);
 
   const ai = getAiClient();
   const prompt = [
@@ -462,7 +510,7 @@ export async function analyzeSingleSheetOcr(params: {
           parts: [
             {
               inlineData: {
-                mimeType: detectedMime || params.mimeType || 'image/jpeg',
+                mimeType: effectiveMime,
                 data: base64,
               },
             },
@@ -507,10 +555,7 @@ export async function extractManifestOcr(params: {
   governorates: Governorate[];
   associations: AgriculturalAssociation[];
 }): Promise<ManifestOcrExtractedData> {
-  const { base64, detectedMime } = stripDataUrlPrefix(params.imageBase64);
-  if (!base64 || base64.length < 20) {
-    throw new OcrExtractionError('بيانات صورة البوليصة غير صالحة.', 'UNSUPPORTED_IMAGE');
-  }
+  const { base64, effectiveMime } = validateOcrImageInput(params.imageBase64, params.mimeType);
 
   const ai = getAiClient();
   const assocSample = params.associations
@@ -524,8 +569,8 @@ export async function extractManifestOcr(params: {
     `استخرج الحقول من صورة البوليصة بدقة دون تخمين. إذا لم يكن الحقل واضحًا فأرجِع نصًا فارغًا أو null للأرقام.`,
     `المحافظات المرجعية: ${govSample}.`,
     `أمثلة الجمعيات: ${assocSample}.`,
-    `حدد نوع السماد من القيم: urea (يوريا) أو nitrate (نترات) أو sulfate (سلفات).`,
-    `أرجِع التاريخ بصيغة YYYY-MM-DD إن أمكن، والوقت بصيغة HH:MM، وعدد الشكاير والوزن بالطن.`,
+    `حدد نوع السماد من القيم: urea (يوريا) أو nitrate (نترات) أو sulfate (سلفات). إذا لم يكن نوع السماد واضحًا أو غير مذكور فأرجِع نصًا فارغًا دون تخمين.`,
+    `أرجِع التاريخ بصيغة YYYY-MM-DD إن كان مكتوبًا بوضوح فقط (وإلا أرجِع نصًا فارغًا دون افتراض تاريخ اليوم)، والوقت بصيغة HH:MM، وعدد الشكاير والوزن بالطن.`,
   ].join('\n');
 
   try {
@@ -536,7 +581,7 @@ export async function extractManifestOcr(params: {
           parts: [
             {
               inlineData: {
-                mimeType: detectedMime || params.mimeType || 'image/jpeg',
+                mimeType: effectiveMime,
                 data: base64,
               },
             },
@@ -590,23 +635,34 @@ export async function extractManifestOcr(params: {
     const assocMatch = matchAssociationName(assocName, scopedAssocs.length ? scopedAssocs : params.associations);
 
     const rawFert = sanitizeExtractedText(parsed.fertilizerCode || '').toLowerCase();
-    let fertilizerCode = 'urea';
-    if (rawFert.includes('nitrate') || rawFert.includes('نترات')) fertilizerCode = 'nitrate';
+    let fertilizerCode: 'urea' | 'nitrate' | 'sulfate' | null = null;
+    if (rawFert.includes('urea') || rawFert.includes('يوريا')) fertilizerCode = 'urea';
+    else if (rawFert.includes('nitrate') || rawFert.includes('نترات')) fertilizerCode = 'nitrate';
     else if (rawFert.includes('sulfate') || rawFert.includes('سلفات')) fertilizerCode = 'sulfate';
+
+    const rawDate = sanitizeExtractedText(parsed.arrivalDate || '');
+    const arrivalDate = /^\d{4}-\d{2}-\d{2}$/.test(rawDate) ? rawDate : '';
 
     const warnings = Array.isArray(parsed.warnings)
       ? parsed.warnings.map((w) => sanitizeExtractedText(w)).filter(Boolean)
       : [];
 
+    if (!fertilizerCode) {
+      warnings.push('لم يتم التعرف على نوع السماد في البوليصة؛ يجب تحديد نوع السماد يدويًا قبل الاعتماد.');
+    }
+    if (!arrivalDate) {
+      warnings.push('تاريخ الوصول غير واضح أو مفقود في البوليصة؛ يجب إدخال التاريخ يدويًا قبل الاعتماد.');
+    }
+
     const bags = sanitizeNullableNumber(parsed.manifestBags);
     const tons = sanitizeNullableNumber(parsed.weightTons);
     if (bags === null && tons !== null) {
-      warnings.push('عدد الشكاير غير مكتوب صراحة؛ يمكنك استخدام زر التحويل من الطن (×20).');
+      warnings.push('عدد الشكاير غير مكتوب صراحة؛ يمكنك استخدام زر تحويل الطن إلى شكاير بعد تحديد نوع السماد.');
     }
 
     return {
       manifestNumber: sanitizeExtractedText(parsed.manifestNumber || ''),
-      arrivalDate: sanitizeExtractedText(parsed.arrivalDate || new Date().toISOString().slice(0, 10)),
+      arrivalDate,
       arrivalTime: sanitizeExtractedText(parsed.arrivalTime || ''),
       governorateName: govName,
       matchedGovernorateId: matchedGov?.id || null,

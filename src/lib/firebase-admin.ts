@@ -25,3 +25,4 @@ const adminApp = getApps().length
 // execute through the client Firebase SDK enforced by firestore.rules.
 export const adminAuth = getAuth(adminApp);
 export const firebaseProjectId = firebaseConfig.projectId;
+export const firestoreDatabaseId = firebaseConfig.firestoreDatabaseId || '(default)';

@@ -1,24 +1,38 @@
 # Security Specification — DST Fertilizer Management System
 
 ## 1. Data Invariants
-1. **Zero Self-Assigned Privilege Escalation**: A non-admin user creating their own `/users/{userId}` profile MUST only receive the default `field_staff` role (unless bootstrapped admin email `ahmedsridy@gmail.com` is verified) and MUST NOT be able to mutate their `role` or `isActive` fields.
-2. **PII Isolation**: User profiles (`/users/{userId}`) contain email addresses and are readable only by the owner (`request.auth.uid == userId`) or an administrator. Driver national IDs and phone numbers in `/tractor_deliveries` are protected from unauthenticated reads and list scraping.
+1. **Zero Self-Assigned Privilege Escalation & Invite-Only Onboarding**: Open self-registration is forbidden. Only the explicit bootstrap administrator (`ahmedsridy@gmail.com`) or a Google user claiming a matching active `/user_invites/{inviteId}` document may create `/users/{userId}` with the exact pre-authorized role and governorates. Non-admins cannot mutate `role`, `isActive`, `governorateIds`, or `permissions`. Legacy `passwordHash` fields are banned from `/users/{userId}` schemas and rules.
+2. **PII Isolation**: User profiles (`/users/{userId}`) contain email addresses and are readable only by the owner (`request.auth.uid == userId`) or an administrator. Driver national IDs and phone numbers in `/tractor_deliveries` are strictly scoped to active authenticated users within authorized governorates.
 3. **Path ID & Payload Boundary Hardening**: All document IDs must match `^[a-zA-Z0-9_-]+$` and be `<= 128` chars. All string fields enforce explicit `.size()` upper bounds, and numeric disbursement/bag quantities must be non-negative (`>= 0`).
-4. **Immutable Ownership & Audit Trail**: `createdByUid` and `createdAt` cannot be modified after creation; `/audit_logs` cannot be modified or deleted by client SDKs.
-5. **Terminal State Locking**: Once a `daily_reports` document reaches `approved`, non-admin clients cannot alter it.
-6. **Strict Verified Authentication**: All client Firestore writes require `request.auth != null && request.auth.token.email_verified == true`.
-7. **Zero Client Query Trust**: Every `allow list` rule validates `resource.data` against `request.auth` without calling `get()` or `exists()`.
+4. **Immutable Ownership & Audit Trail**: `createdByUid` and `createdAt` cannot be modified after creation; `/audit_logs`, `/approvals`, and `/integration_logs` cannot be modified or deleted by client SDKs.
+5. **Workflow State Machine, Anti-Self-Approval & Atomic Approvals**:
+   - `daily_reports` status transitions mirror `canTransitionReportStatus` in `firestore.rules` (draft -> completed -> under_review -> approved/rejected; rejected -> draft/completed).
+   - Non-admin users (`chief`) CANNOT approve a report they created (`existing().createdByUid != request.auth.uid`).
+   - Rejecting a report requires a non-empty `rejectionReason`.
+   - Every status change MUST set `lastApprovalId` and atomically create `/approvals/{lastApprovalId}` in the same `writeBatch`, verified via `existsAfter` and `getAfter` (`toStatus`, `reportId`, `actorUid`).
+   - Once a `daily_reports` document reaches `approved`, non-admins cannot mutate its status or disbursements (only `chief` may update `centralSyncStatus` + `updatedAt` via the real server-side central sync route).
+6. **Tractor Creation & Deterministic Disbursement Integrity**:
+   - Non-admin users creating `/tractor_deliveries/{id}` MUST set `approvalState == 'pending'`.
+   - Creating `/daily_disbursements/{disbursementId}` enforces the deterministic key `${reportId}_${associationId}_${fertilizerCode}` (create-only so existing legacy documents remain updatable) and validates via `existsAfter`/`getAfter` that the parent `daily_reports/{reportId}` has matching `governorateId` and (for non-admins) `status != 'approved'`.
+7. **Strict Verified Authentication**: All client Firestore reads/writes (except `/test/connection`) require `request.auth != null && request.auth.token.email_verified == true`.
+8. **Role/Governorate Lookup via `users/{uid}` & Firestore Rule Read Limits**:
+   - Because the project runs on Firebase Starter Tier without Admin SDK IAM custom claims, RBAC role and governorate scoping in `allow get`, `allow list`, and writes perform a `get()` / `exists()` lookup against `/users/$(request.auth.uid)` (unless the caller matches the bootstrap admin token email).
+   - **Firestore Limits**: Cloud Firestore allows up to **10** `get()`/`exists()`/`getAfter()`/`existsAfter()` calls per single-document request and **20** per multi-document transaction or `writeBatch`. Repeated calls to the same document path (such as `users/$(request.auth.uid)` or the same parent `daily_reports/{reportId}` across a batch) are cached by Firestore and counted once per unique path, keeping batches well within limits while requiring clients to scope `list` queries with matching `governorateId` filters.
 
-## 2. The "Dirty Dozen" Adversarial Payloads (Expected: PERMISSION_DENIED)
+## 2. Adversarial Payloads (Expected: PERMISSION_DENIED)
 1. **Unauthenticated Read**: `GET /users/user1` with `auth == null` -> DENIED.
 2. **Unverified Email Write**: `CREATE /users/user1` with `email_verified: false` -> DENIED.
 3. **Self-Role Escalation on Create**: `CREATE /users/u1` with `{ uid: "u1", role: "admin", ... }` by non-admin -> DENIED.
-4. **Shadow Field Injection**: `CREATE /users/u1` with extra `{ isSuperUser: true }` -> DENIED.
+4. **Shadow Field / Password Hash Injection**: `CREATE` or `UPDATE /users/u1` including `passwordHash` or `{ isSuperUser: true }` -> DENIED.
 5. **Role Tampering on Update**: `UPDATE /users/u1` changing `role` to `"chief"` as non-admin -> DENIED.
 6. **Cross-User PII Read**: `GET /users/u2` as `u1` (`field_staff`) -> DENIED.
 7. **Blanket Users List**: `LIST /users` as `field_staff` -> DENIED.
 8. **ID Poisoning**: `CREATE /notifications/bad..id..with..1500chars` -> DENIED.
-9. **Negative Quantity Injection**: `CREATE /daily_disbursements/d1` with `openingBalance: -50` -> DENIED.
-10. **Impersonated Ownership**: `CREATE /daily_reports/r1` with `createdByUid: "someone_else"` -> DENIED.
-11. **Audit Log Tampering**: `UPDATE` or `DELETE /audit_logs/log1` -> DENIED.
-12. **Terminal State Mutation**: `UPDATE /daily_reports/r1` when `existing().status == "approved"` by non-admin -> DENIED.
+9. **Negative Quantity Injection**: `CREATE /daily_disbursements/r1_a1_urea` with `openingBalance: -50` -> DENIED.
+10. **Pre-Approved Tractor Creation**: `CREATE /tractor_deliveries/t1` with `approvalState: "final_approved"` by non-admin -> DENIED.
+11. **Self-Approval of Daily Report**: `UPDATE /daily_reports/r1` to `status: "approved"` by `chief` where `createdByUid == chief.uid` -> DENIED.
+12. **Rejection Without Reason**: `UPDATE /daily_reports/r1` to `status: "rejected"` with `rejectionReason: ""` -> DENIED.
+13. **Status Change Without Atomic Approval Record**: `UPDATE /daily_reports/r1` changing `status` without creating matching `/approvals/{lastApprovalId}` in the same batch -> DENIED.
+14. **Non-Deterministic or Cross-Gov Disbursement Create**: `CREATE /daily_disbursements/randomId` or creating a disbursement under an `approved` report or mismatched `governorateId` -> DENIED.
+15. **Audit Log Tampering**: `UPDATE` or `DELETE /audit_logs/log1` -> DENIED.
+16. **Terminal State Mutation**: `UPDATE /daily_reports/r1` changing `status` when `existing().status == "approved"` by non-admin -> DENIED.

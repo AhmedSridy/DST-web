@@ -101,8 +101,16 @@ test('computeTractorMetrics classifies matched, shortage, surplus, damaged (actu
   });
 });
 
-test('tonsToBags and bagsToTons convert at 20 bags per ton', () => {
-  assert.equal(tonsToBags(25), 500);
-  assert.equal(tonsToBags(12.5), 250);
-  assert.equal(bagsToTons(500), 25);
+test('tonsToBags and bagsToTons convert dynamically via 1000 / bagWeightKg and reject missing weight', () => {
+  assert.equal(tonsToBags(25, 50), 500);
+  assert.equal(tonsToBags(12.5, 50), 250);
+  assert.equal(tonsToBags(10, 25), 400);
+  assert.equal(bagsToTons(500, 50), 25);
+  assert.equal(bagsToTons(400, 25), 10);
+
+  assert.equal(tonsToBags(15, undefined), null);
+  assert.equal(tonsToBags(15, null), null);
+  assert.equal(tonsToBags(15, 0), null);
+  assert.equal(tonsToBags(15, -50), null);
+  assert.equal(bagsToTons(300, undefined), null);
 });

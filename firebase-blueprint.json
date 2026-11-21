@@ -99,7 +99,6 @@
         "governorateId": { "type": "string", "maxLength": 128 },
         "governorateIds": { "type": "array" },
         "permissions": { "type": "object" },
-        "passwordHash": { "type": "string", "maxLength": 128 },
         "inviteId": { "type": "string", "maxLength": 128 },
         "isActive": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time" },
@@ -151,6 +150,7 @@
         "createdByUid": { "type": "string", "maxLength": 128 },
         "createdByName": { "type": "string", "maxLength": 120 },
         "rejectionReason": { "type": "string", "maxLength": 500 },
+        "lastApprovalId": { "type": "string", "maxLength": 128 },
         "centralSyncStatus": { "type": "string", "enum": ["pending", "synced", "failed"], "maxLength": 32 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }

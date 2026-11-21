@@ -1,24 +1,6 @@
-import ExcelJS from 'exceljs';
-import {
-  AlignmentType,
-  BorderStyle,
-  Document,
-  Packer,
-  PageOrientation,
-  Paragraph,
-  ShadingType,
-  Table,
-  TableCell,
-  TableLayoutType,
-  TableRow,
-  TextRun,
-  WidthType,
-} from 'docx';
-import html2canvas from 'html2canvas';
-import { jsPDF } from 'jspdf';
+import type ExcelJS from 'exceljs';
 import type {
   AgriculturalAssociation,
-  DailyDisbursementRow,
   ExportScope,
   FertilizerType,
   Governorate,
@@ -27,7 +9,6 @@ import type {
   TractorDelivery,
 } from '../types/domain.ts';
 import type { GovernorateBalanceSummary } from './analytics.ts';
-import { escapeHtml } from './arabicNormalize.ts';
 import { computeDisbursementRow, formatNumberAr } from './calculations.ts';
 
 export interface SheetExportRowInput {
@@ -94,6 +75,7 @@ function colLetter(colNumber1Based: number): string {
 }
 
 export async function exportToExcel(ctx: ExportDocumentContext): Promise<string> {
+  const { default: ExcelJS } = await import('exceljs');
   const wb = new ExcelJS.Workbook();
   wb.creator = ctx.organizationNameAr || 'منظومة DST';
   wb.created = new Date();
@@ -423,6 +405,7 @@ export async function exportBalancesToExcel(
   reportDate: string,
   organizationNameAr: string,
 ): Promise<string> {
+  const { default: ExcelJS } = await import('exceljs');
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet('الأرصدة', {
     views: [{ rightToLeft: true, state: 'frozen', ySplit: 3 }],
@@ -480,38 +463,56 @@ export async function exportBalancesToExcel(
   return filename;
 }
 
-function rtlParagraph(text: string, opts?: { bold?: boolean; size?: number; align?: 'right' | 'center'; color?: string }) {
-  return new Paragraph({
-    bidirectional: true,
-    alignment: opts?.align === 'center' ? AlignmentType.CENTER : AlignmentType.RIGHT,
-    children: [
-      new TextRun({
-        text,
-        bold: opts?.bold ?? false,
-        size: opts?.size ?? 18,
-        color: opts?.color,
-        rightToLeft: true,
-        font: 'Arial',
-      }),
-    ],
-  });
-}
-
-function cellBorderConfig() {
-  const b = { style: BorderStyle.SINGLE, size: 4, color: '94A3B8' };
-  return { top: b, bottom: b, left: b, right: b };
-}
-
 export async function exportToWord(
   ctx: ExportDocumentContext,
   scope: ExportScope,
 ): Promise<string> {
+  const {
+    AlignmentType,
+    BorderStyle,
+    Document,
+    Packer,
+    PageOrientation,
+    Paragraph,
+    ShadingType,
+    Table,
+    TableCell,
+    TableLayoutType,
+    TableRow,
+    TextRun,
+    WidthType,
+  } = await import('docx');
+
+  const rtlParagraph = (
+    text: string,
+    opts?: { bold?: boolean; size?: number; align?: 'right' | 'center'; color?: string },
+  ) =>
+    new Paragraph({
+      bidirectional: true,
+      alignment: opts?.align === 'center' ? AlignmentType.CENTER : AlignmentType.RIGHT,
+      children: [
+        new TextRun({
+          text,
+          bold: opts?.bold ?? false,
+          size: opts?.size ?? 18,
+          color: opts?.color,
+          rightToLeft: true,
+          font: 'Arial',
+        }),
+      ],
+    });
+
+  const cellBorderConfig = () => {
+    const b = { style: BorderStyle.SINGLE, size: 4, color: '94A3B8' };
+    return { top: b, bottom: b, left: b, right: b };
+  };
+
   const sortedRows = [...ctx.sheetRows].sort((a, b) => {
     const oa = typeof a.association.sortOrder === 'number' ? a.association.sortOrder : Number.MAX_SAFE_INTEGER;
     const ob = typeof b.association.sortOrder === 'number' ? b.association.sortOrder : Number.MAX_SAFE_INTEGER;
     return oa !== ob ? oa - ob : a.association.nameAr.localeCompare(b.association.nameAr, 'ar');
   });
-  const children: Array<Paragraph | Table> = [
+  const children: Array<InstanceType<typeof Paragraph> | InstanceType<typeof Table>> = [
     rtlParagraph(`${ctx.organizationNameAr} — تقرير صرف الأسمدة الزراعية`, {
       bold: true,
       size: 28,
@@ -794,25 +795,87 @@ export async function exportToWord(
   return filename;
 }
 
+function createStyledEl<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  styles: Partial<CSSStyleDeclaration>,
+  text?: string,
+): HTMLElementTagNameMap[K] {
+  const el = document.createElement(tag);
+  Object.assign(el.style, styles);
+  if (text !== undefined) {
+    el.textContent = text;
+  }
+  return el;
+}
+
+function createTableCell(
+  tag: 'th' | 'td',
+  text: string,
+  opts?: {
+    align?: 'right' | 'center' | 'left';
+    bold?: boolean;
+    padding?: string;
+    colSpan?: number;
+    rowSpan?: number;
+  },
+): HTMLTableCellElement {
+  const cell = createStyledEl(
+    tag,
+    {
+      border: '1px solid #000',
+      padding: opts?.padding ?? '4px',
+      textAlign: opts?.align ?? 'center',
+      fontWeight: opts?.bold ? '700' : tag === 'th' ? '700' : '400',
+    },
+    text,
+  );
+  if (opts?.colSpan) cell.colSpan = opts.colSpan;
+  if (opts?.rowSpan) cell.rowSpan = opts.rowSpan;
+  return cell;
+}
+
+function buildPdfHeaderBlock(title: string, subtitle: string): HTMLDivElement {
+  const header = createStyledEl('div', {
+    textAlign: 'center',
+    borderBottom: '2px solid #000',
+    paddingBottom: '8px',
+    marginBottom: '10px',
+  });
+  header.appendChild(
+    createStyledEl('h1', { margin: '0', fontSize: '18px', fontWeight: '800' }, title),
+  );
+  header.appendChild(
+    createStyledEl('p', { margin: '4px 0 0', fontSize: '12px' }, subtitle),
+  );
+  return header;
+}
+
 export async function exportToPdf(
   ctx: ExportDocumentContext,
   scope: ExportScope,
 ): Promise<string> {
+  const [{ default: html2canvas }, { jsPDF }] = await Promise.all([
+    import('html2canvas'),
+    import('jspdf'),
+  ]);
+
   const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
   const container = document.createElement('div');
   container.setAttribute('dir', 'rtl');
-  container.style.position = 'fixed';
-  container.style.left = '-12000px';
-  container.style.top = '0';
-  container.style.width = '1120px';
-  container.style.background = '#ffffff';
-  container.style.color = '#000000';
-  container.style.fontFamily = "'IBM Plex Sans Arabic', 'Cairo', sans-serif";
-  container.style.padding = '16px';
+  Object.assign(container.style, {
+    position: 'fixed',
+    left: '-12000px',
+    top: '0',
+    width: '1120px',
+    background: '#ffffff',
+    color: '#000000',
+    fontFamily: "'IBM Plex Sans Arabic', 'Cairo', sans-serif",
+    padding: '16px',
+  });
   document.body.appendChild(container);
 
-  const renderPageHtml = async (html: string, isFirstPage: boolean) => {
-    container.innerHTML = html;
+  const renderPageNode = async (pageNode: HTMLElement, isFirstPage: boolean) => {
+    container.replaceChildren(pageNode);
     await new Promise((r) => setTimeout(r, 40));
     const canvas = await html2canvas(container, {
       scale: 2,
@@ -883,8 +946,47 @@ export async function exportToPdf(
       const totalPages = Math.max(1, Math.ceil(sortedPdfRows.length / chunkSize));
       for (let p = 0; p < totalPages; p++) {
         const slice = sortedPdfRows.slice(p * chunkSize, (p + 1) * chunkSize);
-        const rowsHtml = slice
-          .map((item) => {
+        const pageDiv = createStyledEl('div', { background: '#fff', color: '#000', direction: 'rtl' });
+        pageDiv.appendChild(
+          buildPdfHeaderBlock(
+            `${ctx.organizationNameAr} — كشف الصرف اليومي للأسمدة`,
+            `المحافظة: ${ctx.governorate.nameAr} | التاريخ: ${ctx.reportDate} | صفحة ${p + 1} من ${totalPages}`,
+          ),
+        );
+
+        const table = createStyledEl('table', {
+          width: '100%',
+          borderCollapse: 'collapse',
+          fontSize: '10px',
+          color: '#000',
+          background: '#fff',
+        });
+
+        const thead = document.createElement('thead');
+        const groupRow = createStyledEl('tr', { background: '#f1f5f9' });
+        groupRow.appendChild(createTableCell('th', 'الجمعية', { rowSpan: 2, padding: '5px', align: 'right' }));
+        for (const groupLabel of ['بداية اليوم', 'نهاية اليوم', 'المنصرف', 'التسوية', 'فرق التسوية']) {
+          groupRow.appendChild(createTableCell('th', groupLabel, { colSpan: 3, padding: '4px' }));
+        }
+        groupRow.appendChild(createTableCell('th', 'الحالة', { rowSpan: 2, padding: '5px' }));
+        thead.appendChild(groupRow);
+
+        const subRow = createStyledEl('tr', { background: '#f8fafc' });
+        for (let g = 0; g < 5; g++) {
+          for (const fertLabel of ['يوريا', 'نترات', 'سلفات']) {
+            subRow.appendChild(createTableCell('th', fertLabel, { padding: '3px' }));
+          }
+        }
+        thead.appendChild(subRow);
+        table.appendChild(thead);
+
+        const tbody = document.createElement('tbody');
+        if (slice.length === 0) {
+          const emptyTr = document.createElement('tr');
+          emptyTr.appendChild(createTableCell('td', 'لا توجد صفوف جمعيات.', { colSpan: 17, padding: '12px' }));
+          tbody.appendChild(emptyTr);
+        } else {
+          for (const item of slice) {
             const uCalc = computeDisbursementRow(
               { openingBalance: item.urea.opening, closingBalance: item.urea.closing, settlementQty: item.urea.settlement },
               ctx.treatEmptyAsZero,
@@ -898,89 +1000,74 @@ export async function exportToPdf(
               ctx.treatEmptyAsZero,
             );
             const anyVar = uCalc.hasVariance || nCalc.hasVariance || sCalc.hasVariance;
-            const statusStr = anyVar ? '⚠ اختلاف' : '✔ مطابق';
-            return `
-              <tr>
-                <td style="border:1px solid #000;padding:4px 6px;text-align:right;font-weight:700;">${escapeHtml(item.association.nameAr)}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(item.urea.opening))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(item.nitrate.opening))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(item.sulfate.opening))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(item.urea.closing))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(item.nitrate.closing))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(item.sulfate.closing))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;font-weight:700;">${escapeHtml(formatNumberAr(uCalc.actualDisbursed))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;font-weight:700;">${escapeHtml(formatNumberAr(nCalc.actualDisbursed))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;font-weight:700;">${escapeHtml(formatNumberAr(sCalc.actualDisbursed))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(item.urea.settlement))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(item.nitrate.settlement))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(item.sulfate.settlement))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;font-weight:700;">${escapeHtml(formatNumberAr(uCalc.variance))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;font-weight:700;">${escapeHtml(formatNumberAr(nCalc.variance))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;font-weight:700;">${escapeHtml(formatNumberAr(sCalc.variance))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;font-weight:700;">${escapeHtml(statusStr)}</td>
-              </tr>
-            `;
-          })
-          .join('');
+            const tr = document.createElement('tr');
+            tr.appendChild(
+              createTableCell('td', item.association.nameAr, { align: 'right', bold: true, padding: '4px 6px' }),
+            );
+            const cellSpecs: Array<[string, boolean]> = [
+              [formatNumberAr(item.urea.opening), false],
+              [formatNumberAr(item.nitrate.opening), false],
+              [formatNumberAr(item.sulfate.opening), false],
+              [formatNumberAr(item.urea.closing), false],
+              [formatNumberAr(item.nitrate.closing), false],
+              [formatNumberAr(item.sulfate.closing), false],
+              [formatNumberAr(uCalc.actualDisbursed), true],
+              [formatNumberAr(nCalc.actualDisbursed), true],
+              [formatNumberAr(sCalc.actualDisbursed), true],
+              [formatNumberAr(item.urea.settlement), false],
+              [formatNumberAr(item.nitrate.settlement), false],
+              [formatNumberAr(item.sulfate.settlement), false],
+              [formatNumberAr(uCalc.variance), true],
+              [formatNumberAr(nCalc.variance), true],
+              [formatNumberAr(sCalc.variance), true],
+              [anyVar ? '⚠ اختلاف' : '✔ مطابق', true],
+            ];
+            for (const [val, bold] of cellSpecs) {
+              tr.appendChild(createTableCell('td', val, { bold }));
+            }
+            tbody.appendChild(tr);
+          }
+        }
+        table.appendChild(tbody);
 
         const isLastSheetPage = p === totalPages - 1 && sortedPdfRows.length > 0;
-        const totalsFooterHtml = isLastSheetPage
-          ? `<tfoot>
-              <tr style="background:#e2e8f0;font-weight:800;">
-                <td style="border:1px solid #000;padding:5px 6px;text-align:right;">الإجمالي (${sortedPdfRows.length})</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(pdfTotals.uOpen))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(pdfTotals.nOpen))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(pdfTotals.sOpen))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(pdfTotals.uClose))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(pdfTotals.nClose))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(pdfTotals.sClose))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(pdfTotals.uAct))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(pdfTotals.nAct))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(pdfTotals.sAct))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(pdfTotals.uSettle))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(pdfTotals.nSettle))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(pdfTotals.sSettle))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(pdfTotals.uVar))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(pdfTotals.nVar))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">${escapeHtml(formatNumberAr(pdfTotals.sVar))}</td>
-                <td style="border:1px solid #000;padding:4px;text-align:center;">شيكارة</td>
-              </tr>
-            </tfoot>`
-          : '';
+        if (isLastSheetPage) {
+          const tfoot = document.createElement('tfoot');
+          const footTr = createStyledEl('tr', { background: '#e2e8f0', fontWeight: '800' });
+          footTr.appendChild(
+            createTableCell('td', `الإجمالي (${sortedPdfRows.length})`, {
+              align: 'right',
+              bold: true,
+              padding: '5px 6px',
+            }),
+          );
+          const totalVals = [
+            formatNumberAr(pdfTotals.uOpen),
+            formatNumberAr(pdfTotals.nOpen),
+            formatNumberAr(pdfTotals.sOpen),
+            formatNumberAr(pdfTotals.uClose),
+            formatNumberAr(pdfTotals.nClose),
+            formatNumberAr(pdfTotals.sClose),
+            formatNumberAr(pdfTotals.uAct),
+            formatNumberAr(pdfTotals.nAct),
+            formatNumberAr(pdfTotals.sAct),
+            formatNumberAr(pdfTotals.uSettle),
+            formatNumberAr(pdfTotals.nSettle),
+            formatNumberAr(pdfTotals.sSettle),
+            formatNumberAr(pdfTotals.uVar),
+            formatNumberAr(pdfTotals.nVar),
+            formatNumberAr(pdfTotals.sVar),
+            'شيكارة',
+          ];
+          for (const val of totalVals) {
+            footTr.appendChild(createTableCell('td', val, { bold: true }));
+          }
+          tfoot.appendChild(footTr);
+          table.appendChild(tfoot);
+        }
 
-        const pageHtml = `
-          <div style="background:#fff;color:#000;direction:rtl;">
-            <div style="text-align:center;border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:10px;">
-              <h1 style="margin:0;font-size:18px;font-weight:800;">${escapeHtml(ctx.organizationNameAr)} — كشف الصرف اليومي للأسمدة</h1>
-              <p style="margin:4px 0 0;font-size:12px;">المحافظة: ${escapeHtml(ctx.governorate.nameAr)} | التاريخ: ${escapeHtml(ctx.reportDate)} | صفحة ${p + 1} من ${totalPages}</p>
-            </div>
-            <table style="width:100%;border-collapse:collapse;font-size:10px;color:#000;background:#fff;">
-              <thead>
-                <tr style="background:#f1f5f9;">
-                  <th rowspan="2" style="border:1px solid #000;padding:5px;text-align:right;">الجمعية</th>
-                  <th colspan="3" style="border:1px solid #000;padding:4px;text-align:center;">بداية اليوم</th>
-                  <th colspan="3" style="border:1px solid #000;padding:4px;text-align:center;">نهاية اليوم</th>
-                  <th colspan="3" style="border:1px solid #000;padding:4px;text-align:center;">المنصرف</th>
-                  <th colspan="3" style="border:1px solid #000;padding:4px;text-align:center;">التسوية</th>
-                  <th colspan="3" style="border:1px solid #000;padding:4px;text-align:center;">فرق التسوية</th>
-                  <th rowspan="2" style="border:1px solid #000;padding:5px;text-align:center;">الحالة</th>
-                </tr>
-                <tr style="background:#f8fafc;">
-                  <th style="border:1px solid #000;padding:3px;">يوريا</th><th style="border:1px solid #000;padding:3px;">نترات</th><th style="border:1px solid #000;padding:3px;">سلفات</th>
-                  <th style="border:1px solid #000;padding:3px;">يوريا</th><th style="border:1px solid #000;padding:3px;">نترات</th><th style="border:1px solid #000;padding:3px;">سلفات</th>
-                  <th style="border:1px solid #000;padding:3px;">يوريا</th><th style="border:1px solid #000;padding:3px;">نترات</th><th style="border:1px solid #000;padding:3px;">سلفات</th>
-                  <th style="border:1px solid #000;padding:3px;">يوريا</th><th style="border:1px solid #000;padding:3px;">نترات</th><th style="border:1px solid #000;padding:3px;">سلفات</th>
-                  <th style="border:1px solid #000;padding:3px;">يوريا</th><th style="border:1px solid #000;padding:3px;">نترات</th><th style="border:1px solid #000;padding:3px;">سلفات</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${rowsHtml || '<tr><td colspan="17" style="border:1px solid #000;padding:12px;text-align:center;">لا توجد صفوف جمعيات.</td></tr>'}
-              </tbody>
-              ${totalsFooterHtml}
-            </table>
-          </div>
-        `;
-        await renderPageHtml(pageHtml, !pageAdded);
+        pageDiv.appendChild(table);
+        await renderPageNode(pageDiv, !pageAdded);
         pageAdded = true;
       }
     }
@@ -989,54 +1076,74 @@ export async function exportToPdf(
       const trPages = Math.max(1, Math.ceil(ctx.tractors.length / chunkSize));
       for (let p = 0; p < trPages; p++) {
         const slice = ctx.tractors.slice(p * chunkSize, (p + 1) * chunkSize);
-        const rowsHtml = slice
-          .map((tr) => {
+        const pageDiv = createStyledEl('div', { background: '#fff', color: '#000', direction: 'rtl' });
+        pageDiv.appendChild(
+          buildPdfHeaderBlock(
+            `${ctx.organizationNameAr} — سجل الجرارات والبوليصات`,
+            `المحافظة: ${ctx.governorate.nameAr} | التاريخ: ${ctx.reportDate} | صفحة ${p + 1} من ${trPages}`,
+          ),
+        );
+
+        const table = createStyledEl('table', {
+          width: '100%',
+          borderCollapse: 'collapse',
+          fontSize: '11px',
+          color: '#000',
+          background: '#fff',
+        });
+
+        const thead = document.createElement('thead');
+        const headTr = createStyledEl('tr', { background: '#f1f5f9' });
+        const tractorCols: Array<[string, 'right' | 'center']> = [
+          ['التاريخ', 'center'],
+          ['الجمعية المستلمة', 'right'],
+          ['رقم الجرار', 'center'],
+          ['رقم البوليصة', 'center'],
+          ['الصنف', 'center'],
+          ['عدد البوليصة', 'center'],
+          ['العدد الفعلي', 'center'],
+          ['فرق الشحنة', 'center'],
+          ['الحالة', 'center'],
+        ];
+        for (const [label, align] of tractorCols) {
+          headTr.appendChild(createTableCell('th', label, { align, padding: '6px' }));
+        }
+        thead.appendChild(headTr);
+        table.appendChild(thead);
+
+        const tbody = document.createElement('tbody');
+        if (slice.length === 0) {
+          const emptyTr = document.createElement('tr');
+          emptyTr.appendChild(
+            createTableCell('td', 'لا توجد جرارات مسجلة لهذا النطاق.', { colSpan: 9, padding: '12px' }),
+          );
+          tbody.appendChild(emptyTr);
+        } else {
+          for (const tr of slice) {
             const assoc = ctx.associations.find((a) => a.id === tr.associationId);
             const fert = ctx.fertilizerTypes.find((f) => f.code === tr.fertilizerCode);
             const matched = tr.inspectionStatus === 'matched' && tr.bagVariance === 0;
-            return `
-              <tr>
-                <td style="border:1px solid #000;padding:5px;text-align:center;">${escapeHtml(tr.arrivalDate)}</td>
-                <td style="border:1px solid #000;padding:5px;text-align:right;font-weight:700;">${escapeHtml(assoc?.nameAr || tr.associationId)}</td>
-                <td style="border:1px solid #000;padding:5px;text-align:center;">${escapeHtml(tr.tractorPlate)}</td>
-                <td style="border:1px solid #000;padding:5px;text-align:center;">${escapeHtml(tr.manifestNumber)}</td>
-                <td style="border:1px solid #000;padding:5px;text-align:center;">${escapeHtml(fert?.nameAr || tr.fertilizerCode)}</td>
-                <td style="border:1px solid #000;padding:5px;text-align:center;">${escapeHtml(formatNumberAr(tr.manifestBags))}</td>
-                <td style="border:1px solid #000;padding:5px;text-align:center;">${escapeHtml(formatNumberAr(tr.actualBags))}</td>
-                <td style="border:1px solid #000;padding:5px;text-align:center;font-weight:700;">${escapeHtml(formatNumberAr(tr.bagVariance))}</td>
-                <td style="border:1px solid #000;padding:5px;text-align:center;font-weight:700;">${escapeHtml(matched ? '✔ مطابق' : '⚠ اختلاف')}</td>
-              </tr>
-            `;
-          })
-          .join('');
-
-        const pageHtml = `
-          <div style="background:#fff;color:#000;direction:rtl;">
-            <div style="text-align:center;border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:10px;">
-              <h1 style="margin:0;font-size:18px;font-weight:800;">${escapeHtml(ctx.organizationNameAr)} — سجل الجرارات والبوليصات</h1>
-              <p style="margin:4px 0 0;font-size:12px;">المحافظة: ${escapeHtml(ctx.governorate.nameAr)} | التاريخ: ${escapeHtml(ctx.reportDate)} | صفحة ${p + 1} من ${trPages}</p>
-            </div>
-            <table style="width:100%;border-collapse:collapse;font-size:11px;color:#000;background:#fff;">
-              <thead>
-                <tr style="background:#f1f5f9;">
-                  <th style="border:1px solid #000;padding:6px;">التاريخ</th>
-                  <th style="border:1px solid #000;padding:6px;text-align:right;">الجمعية المستلمة</th>
-                  <th style="border:1px solid #000;padding:6px;">رقم الجرار</th>
-                  <th style="border:1px solid #000;padding:6px;">رقم البوليصة</th>
-                  <th style="border:1px solid #000;padding:6px;">الصنف</th>
-                  <th style="border:1px solid #000;padding:6px;">عدد البوليصة</th>
-                  <th style="border:1px solid #000;padding:6px;">العدد الفعلي</th>
-                  <th style="border:1px solid #000;padding:6px;">فرق الشحنة</th>
-                  <th style="border:1px solid #000;padding:6px;">الحالة</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${rowsHtml || '<tr><td colspan="9" style="border:1px solid #000;padding:12px;text-align:center;">لا توجد جرارات مسجلة لهذا النطاق.</td></tr>'}
-              </tbody>
-            </table>
-          </div>
-        `;
-        await renderPageHtml(pageHtml, !pageAdded);
+            const rowEl = document.createElement('tr');
+            const cells: Array<[string, 'right' | 'center', boolean]> = [
+              [tr.arrivalDate, 'center', false],
+              [assoc?.nameAr || tr.associationId, 'right', true],
+              [tr.tractorPlate, 'center', false],
+              [tr.manifestNumber, 'center', false],
+              [fert?.nameAr || tr.fertilizerCode, 'center', false],
+              [formatNumberAr(tr.manifestBags), 'center', false],
+              [formatNumberAr(tr.actualBags), 'center', false],
+              [formatNumberAr(tr.bagVariance), 'center', true],
+              [matched ? '✔ مطابق' : '⚠ اختلاف', 'center', true],
+            ];
+            for (const [val, align, bold] of cells) {
+              rowEl.appendChild(createTableCell('td', val, { align, bold, padding: '5px' }));
+            }
+            tbody.appendChild(rowEl);
+          }
+        }
+        table.appendChild(tbody);
+        pageDiv.appendChild(table);
+        await renderPageNode(pageDiv, !pageAdded);
         pageAdded = true;
       }
     }

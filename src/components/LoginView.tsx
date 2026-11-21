@@ -1,21 +1,12 @@
 import React, { useState } from 'react';
-import { ChevronDown, ChevronUp, KeyRound, ShieldCheck, Sprout, UserCheck } from 'lucide-react';
+import { ShieldCheck, Sprout, UserCheck } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.tsx';
 import type { UserRole } from '../types/domain.ts';
 import { ROLE_LABELS_AR } from '../utils/rbac.ts';
 
 export const LoginView: React.FC = () => {
-  const { signInWithGoogle, enterPreviewMode, signInWithLocalCredentials, authError, loading } =
-    useAuth();
+  const { signInWithGoogle, enterPreviewMode, isPreviewAllowed, authError, loading } = useAuth();
   const [selectedPreviewRole, setSelectedPreviewRole] = useState<UserRole>('admin');
-  const [showLocalLogin, setShowLocalLogin] = useState(false);
-  const [localEmail, setLocalEmail] = useState('');
-  const [localPassword, setLocalPassword] = useState('');
-
-  const handleLocalSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    await signInWithLocalCredentials(localEmail, localPassword);
-  };
 
   return (
     <div
@@ -74,104 +65,53 @@ export const LoginView: React.FC = () => {
             <span>تسجيل الدخول بحساب Google</span>
           </button>
 
-          <div className="relative py-1">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-slate-200 dark:border-slate-700" />
-            </div>
-            <div className="relative flex justify-center text-xs">
-              <span className="bg-white dark:bg-slate-900 px-3 text-slate-500 dark:text-slate-400">
-                أو معاينة تفاعلية محلية
-              </span>
-            </div>
-          </div>
-
-          <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-800/50 p-4 space-y-3">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <label
-                htmlFor="preview-role-select"
-                className="text-xs font-semibold text-slate-700 dark:text-slate-300"
-              >
-                اختر الدور الوظيفي للمعاينة الميدانية:
-              </label>
-              <select
-                id="preview-role-select"
-                value={selectedPreviewRole}
-                onChange={(e) => setSelectedPreviewRole(e.target.value as UserRole)}
-                className="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-800 dark:text-slate-100 focus:border-emerald-600 focus:outline-none"
-              >
-                {(['admin', 'chief', 'supervisor', 'field_staff', 'viewer'] as UserRole[]).map(
-                  (role) => (
-                    <option key={role} value={role}>
-                      {ROLE_LABELS_AR[role]}
-                    </option>
-                  ),
-                )}
-              </select>
-            </div>
-            <button
-              type="button"
-              onClick={() => void enterPreviewMode(selectedPreviewRole)}
-              className="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-4 py-2.5 text-sm font-semibold text-slate-800 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
-            >
-              <UserCheck className="w-4 h-4 text-emerald-700 dark:text-emerald-400" />
-              <span>دخول بوضع المعاينة التفاعلية</span>
-            </button>
-          </div>
-
-          {/* Local Credentials Form (for Admin-created local accounts) */}
-          <div className="rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
-            <button
-              type="button"
-              onClick={() => setShowLocalLogin((v) => !v)}
-              className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-800/60 flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-300"
-            >
-              <span className="inline-flex items-center gap-1.5">
-                <KeyRound className="w-3.5 h-3.5 text-slate-500" />
-                دخول بحساب محلي (مُنشأ من مدير النظام)
-              </span>
-              {showLocalLogin ? (
-                <ChevronUp className="w-4 h-4" />
-              ) : (
-                <ChevronDown className="w-4 h-4" />
-              )}
-            </button>
-
-            {showLocalLogin && (
-              <form onSubmit={(e) => void handleLocalSubmit(e)} className="p-4 space-y-3 text-xs">
-                <label className="block space-y-1">
-                  <span className="font-semibold text-slate-700 dark:text-slate-300">
-                    البريد الإلكتروني
+          {isPreviewAllowed && (
+            <>
+              <div className="relative py-1">
+                <div className="absolute inset-0 flex items-center">
+                  <div className="w-full border-t border-slate-200 dark:border-slate-700" />
+                </div>
+                <div className="relative flex justify-center text-xs">
+                  <span className="bg-white dark:bg-slate-900 px-3 text-slate-500 dark:text-slate-400">
+                    أو معاينة تفاعلية محلية (وضع التطوير فقط)
                   </span>
-                  <input
-                    type="email"
-                    required
-                    dir="ltr"
-                    value={localEmail}
-                    onChange={(e) => setLocalEmail(e.target.value)}
-                    placeholder="user@dst-agri.eg"
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 px-3 py-2 text-left"
-                  />
-                </label>
-                <label className="block space-y-1">
-                  <span className="font-semibold text-slate-700 dark:text-slate-300">كلمة المرور</span>
-                  <input
-                    type="password"
-                    required
-                    dir="ltr"
-                    value={localPassword}
-                    onChange={(e) => setLocalPassword(e.target.value)}
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 px-3 py-2 text-left"
-                  />
-                </label>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-800/50 p-4 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <label
+                    htmlFor="preview-role-select"
+                    className="text-xs font-semibold text-slate-700 dark:text-slate-300"
+                  >
+                    اختر الدور الوظيفي للمعاينة الميدانية:
+                  </label>
+                  <select
+                    id="preview-role-select"
+                    value={selectedPreviewRole}
+                    onChange={(e) => setSelectedPreviewRole(e.target.value as UserRole)}
+                    className="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-800 dark:text-slate-100 focus:border-emerald-600 focus:outline-none"
+                  >
+                    {(['admin', 'chief', 'supervisor', 'field_staff', 'viewer'] as UserRole[]).map(
+                      (role) => (
+                        <option key={role} value={role}>
+                          {ROLE_LABELS_AR[role]}
+                        </option>
+                      ),
+                    )}
+                  </select>
+                </div>
                 <button
-                  type="submit"
-                  className="w-full rounded-lg bg-slate-900 dark:bg-emerald-700 px-4 py-2 font-bold text-white hover:bg-slate-800 dark:hover:bg-emerald-800"
+                  type="button"
+                  onClick={() => void enterPreviewMode(selectedPreviewRole)}
+                  className="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-4 py-2.5 text-sm font-semibold text-slate-800 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
                 >
-                  تسجيل الدخول المحلي
+                  <UserCheck className="w-4 h-4 text-emerald-700 dark:text-emerald-400" />
+                  <span>دخول بوضع المعاينة التفاعلية</span>
                 </button>
-              </form>
-            )}
-          </div>
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>

@@ -70,11 +70,29 @@ service cloud.firestore {
       );
     }
 
-    function isSupervisorOrAbove() {
+    function hasRole(roles) {
+      return isActiveCaller() && hasUserDoc() && userDoc().role in roles;
+    }
+
+    function isAllowedReportStatusTransition(oldStatus, newStatus, createdByUid) {
       return isAdmin() || (
-        isActiveCaller() &&
-        userDoc().role in ['supervisor', 'chief', 'admin']
+        oldStatus != 'approved' && (
+          (newStatus == 'completed' && (oldStatus == 'draft' || oldStatus == 'rejected') && hasRole(['field_staff', 'supervisor'])) ||
+          (newStatus == 'under_review' && oldStatus == 'completed' && hasRole(['supervisor', 'chief'])) ||
+          (newStatus == 'approved' && (oldStatus == 'under_review' || oldStatus == 'completed') && hasRole(['chief']) && createdByUid != request.auth.uid) ||
+          (newStatus == 'rejected' && (oldStatus == 'under_review' || oldStatus == 'completed') && hasRole(['chief'])) ||
+          (newStatus == 'draft' && oldStatus == 'rejected' && hasRole(['field_staff', 'supervisor']))
+        )
       );
+    }
+
+    function hasValidApprovalLink(reportId) {
+      return ('lastApprovalId' in incoming()) &&
+        isValidId(incoming().lastApprovalId) &&
+        existsAfter(/databases/$(database)/documents/approvals/$(incoming().lastApprovalId)) &&
+        getAfter(/databases/$(database)/documents/approvals/$(incoming().lastApprovalId)).data.toStatus == incoming().status &&
+        getAfter(/databases/$(database)/documents/approvals/$(incoming().lastApprovalId)).data.reportId == reportId &&
+        getAfter(/databases/$(database)/documents/approvals/$(incoming().lastApprovalId)).data.actorUid == request.auth.uid;
     }
 
     // Chief without assigned governorates OR Admin has nationwide governorate access;
@@ -147,7 +165,7 @@ service cloud.firestore {
     // ==================== Validation Blueprints ====================
     function isValidUserProfile(data) {
       return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'isActive']) &&
-        data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'governorateId', 'governorateIds', 'permissions', 'passwordHash', 'inviteId', 'isActive', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'governorateId', 'governorateIds', 'permissions', 'inviteId', 'isActive', 'createdAt', 'updatedAt']) &&
         isValidId(data.uid) &&
         data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
         data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
@@ -155,7 +173,6 @@ service cloud.firestore {
         (!('governorateId' in data) || (data.governorateId is string && data.governorateId.size() <= 128)) &&
         (!('governorateIds' in data) || (data.governorateIds is list && data.governorateIds.size() <= 30 && (data.governorateIds.size() == 0 || data.governorateIds[0] is string))) &&
         (!('permissions' in data) || data.permissions is map) &&
-        (!('passwordHash' in data) || (data.passwordHash is string && data.passwordHash.size() <= 128)) &&
         (!('inviteId' in data) || isValidId(data.inviteId)) &&
         data.isActive is bool &&
         (!('createdAt' in data) || data.createdAt is timestamp) &&
@@ -213,13 +230,14 @@ service cloud.firestore {
 
     function isValidDailyReport(data) {
       return data.keys().hasAll(['governorateId', 'reportDate', 'status', 'createdByUid']) &&
-        data.keys().hasOnly(['governorateId', 'reportDate', 'status', 'createdByUid', 'createdByName', 'rejectionReason', 'centralSyncStatus', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['governorateId', 'reportDate', 'status', 'createdByUid', 'createdByName', 'rejectionReason', 'lastApprovalId', 'centralSyncStatus', 'createdAt', 'updatedAt']) &&
         isValidId(data.governorateId) &&
         isValidDateIso(data.reportDate) &&
         data.status in ['draft', 'completed', 'under_review', 'approved', 'rejected'] &&
         isValidId(data.createdByUid) &&
         (!('createdByName' in data) || (data.createdByName is string && data.createdByName.size() <= 120)) &&
         (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 500)) &&
+        (!('lastApprovalId' in data) || data.lastApprovalId == '' || isValidId(data.lastApprovalId)) &&
         (!('centralSyncStatus' in data) || data.centralSyncStatus in ['pending', 'synced', 'failed']) &&
         (!('createdAt' in data) || data.createdAt is timestamp) &&
         (!('updatedAt' in data) || data.updatedAt is timestamp);
@@ -511,17 +529,23 @@ service cloud.firestore {
         incoming().createdByUid == existing().createdByUid &&
         (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt) &&
         (!('updatedAt' in incoming()) || incoming().updatedAt == request.time) && (
-          isAdmin() ||
-          (existing().status == 'approved' &&
-            isChief() &&
+          (incoming().status != existing().status &&
             userCanAccessGov(existing().governorateId) &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['centralSyncStatus', 'updatedAt'])) ||
-          (existing().status != 'approved' && (
-            (canEditInGov(existing().governorateId) &&
-              incoming().status in ['draft', 'completed'] &&
-              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])) ||
-            (canApproveInGov(existing().governorateId) &&
-              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'rejectionReason', 'centralSyncStatus', 'updatedAt']))
+            isAllowedReportStatusTransition(existing().status, incoming().status, existing().createdByUid) &&
+            (incoming().status != 'rejected' ||
+              (('rejectionReason' in incoming()) && incoming().rejectionReason is string && incoming().rejectionReason.size() >= 1)) &&
+            hasValidApprovalLink(reportId) && (
+              isAdmin() ||
+              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'lastApprovalId', 'rejectionReason', 'updatedAt'])
+            )) ||
+          (incoming().status == existing().status && (
+            isAdmin() ||
+            (isChief() &&
+              userCanAccessGov(existing().governorateId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['centralSyncStatus', 'updatedAt'])) ||
+            (existing().status != 'approved' &&
+              canEditInGov(existing().governorateId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['updatedAt']))
           ))
         );
       allow delete: if isValidId(reportId) && isActiveCaller() && (
@@ -530,7 +554,7 @@ service cloud.firestore {
       );
     }
 
-    // Daily Disbursements (Governorate-scoped + Atomic parent report guarantee)
+    // Daily Disbursements (Governorate-scoped + Deterministic create ID + Atomic parent report guarantee)
     match /daily_disbursements/{disbursementId} {
       allow get: if isValidId(disbursementId) && isActiveCaller() && userCanAccessGov(existing().governorateId);
       allow list: if isUnrestrictedGovCaller() || (
@@ -538,10 +562,13 @@ service cloud.firestore {
         userCanAccessGov(resource.data.governorateId)
       );
       allow create: if isValidId(disbursementId) && isActiveCaller() && isValidDailyDisbursement(incoming()) &&
+        disbursementId == incoming().reportId + '_' + incoming().associationId + '_' + incoming().fertilizerCode &&
         canEditInGov(incoming().governorateId) &&
         incoming().createdByUid == request.auth.uid &&
         (!('updatedAt' in incoming()) || incoming().updatedAt == request.time) &&
-        existsAfter(/databases/$(database)/documents/daily_reports/$(incoming().reportId));
+        existsAfter(/databases/$(database)/documents/daily_reports/$(incoming().reportId)) &&
+        getAfter(/databases/$(database)/documents/daily_reports/$(incoming().reportId)).data.governorateId == incoming().governorateId &&
+        (isAdmin() || getAfter(/databases/$(database)/documents/daily_reports/$(incoming().reportId)).data.status != 'approved');
       allow update: if isValidId(disbursementId) && isActiveCaller() && isValidDailyDisbursement(incoming()) &&
         incoming().reportId == existing().reportId &&
         incoming().governorateId == existing().governorateId &&
@@ -573,6 +600,7 @@ service cloud.firestore {
       allow create: if isValidId(deliveryId) && isActiveCaller() && isValidTractorDelivery(incoming()) &&
         canEditInGov(incoming().governorateId) &&
         incoming().createdByUid == request.auth.uid &&
+        (isAdmin() || incoming().approvalState == 'pending') &&
         (!('createdAt' in incoming()) || incoming().createdAt == request.time);
       allow update: if isValidId(deliveryId) && isActiveCaller() && isValidTractorDelivery(incoming()) &&
         incoming().governorateId == existing().governorateId &&
@@ -603,9 +631,11 @@ service cloud.firestore {
         userCanAccessGov(resource.data.governorateId)
       );
       allow create: if isValidId(approvalId) && isActiveCaller() && isValidApprovalRecord(incoming()) &&
-        canApproveInGov(incoming().governorateId) &&
         incoming().actorUid == request.auth.uid &&
-        (!('createdAt' in incoming()) || incoming().createdAt == request.time);
+        (!('createdAt' in incoming()) || incoming().createdAt == request.time) && (
+          canApproveInGov(incoming().governorateId) ||
+          (canEditInGov(incoming().governorateId) && incoming().action in ['submitted', 'reopened'])
+        );
       allow update, delete: if false;
     }
 

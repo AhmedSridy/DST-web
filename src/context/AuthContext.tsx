@@ -4,7 +4,6 @@ import { doc, getDoc, runTransaction, serverTimestamp, setDoc, updateDoc } from 
 import { auth, db, googleAuthProvider, handleFirestoreError, OperationType } from '../lib/firebase.ts';
 import type { GranularPermissions, UserProfile, UserRole } from '../types/domain.ts';
 import { computeInviteId } from '../utils/arabicNormalize.ts';
-import { sha256Hex } from '../utils/crypto.ts';
 import { loadSessionState, saveSessionState } from '../utils/offlineDb.ts';
 import { getDefaultGranularPermissions } from '../utils/rbac.ts';
 
@@ -12,15 +11,18 @@ const BOOTSTRAP_ADMIN_EMAIL = 'ahmedsridy@gmail.com';
 const UNAUTHORIZED_MSG =
   'حسابك غير مصرح له بالدخول إلى المنظومة. يرجى مراجعة مدير النظام لإضافة بريدك الإلكتروني أولًا.';
 
+/** Preview mode, mock users, and ?autostart=1 are strictly disabled in production builds. */
+export const IS_PREVIEW_MODE_ENABLED = !import.meta.env.PROD;
+
 interface AuthContextValue {
   firebaseUser: User | null;
   profile: UserProfile | null;
   authMode: 'firebase' | 'preview' | 'unauthenticated';
   loading: boolean;
   authError: string | null;
+  isPreviewAllowed: boolean;
   signInWithGoogle: () => Promise<void>;
   enterPreviewMode: (role?: UserRole) => Promise<void>;
-  signInWithLocalCredentials: (email: string, password: string) => Promise<void>;
   switchPreviewRole: (role: UserRole) => Promise<void>;
   syncPreviewProfile: (updatedUser: UserProfile) => Promise<void>;
   logout: () => Promise<void>;
@@ -29,54 +31,56 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
-export const PREVIEW_USERS: Record<UserRole, UserProfile> = {
-  field_staff: {
-    uid: 'demo-field-staff',
-    email: 'field@dst-agri.eg',
-    displayName: 'م. كريم طارق (موظف ميداني)',
-    role: 'field_staff',
-    governorateId: 'gov-ismailia',
-    governorateIds: ['gov-ismailia'],
-    permissions: getDefaultGranularPermissions('field_staff'),
-    isActive: true,
-  },
-  supervisor: {
-    uid: 'demo-supervisor',
-    email: 'supervisor@dst-agri.eg',
-    displayName: 'م. سحر عبد المنعم (مشرف)',
-    role: 'supervisor',
-    governorateId: 'gov-ismailia',
-    governorateIds: ['gov-ismailia', 'gov-suez'],
-    permissions: getDefaultGranularPermissions('supervisor'),
-    isActive: true,
-  },
-  chief: {
-    uid: 'demo-chief',
-    email: 'chief@dst-agri.eg',
-    displayName: 'د. طارق الغمراوي (رئيس القطاع)',
-    role: 'chief',
-    permissions: getDefaultGranularPermissions('chief'),
-    isActive: true,
-  },
-  admin: {
-    uid: 'demo-admin',
-    email: 'admin@dst-agri.eg',
-    displayName: 'م. علاء السريدي (مدير النظام)',
-    role: 'admin',
-    permissions: getDefaultGranularPermissions('admin'),
-    isActive: true,
-  },
-  viewer: {
-    uid: 'demo-viewer',
-    email: 'viewer@dst-agri.eg',
-    displayName: 'أ. نورهان حسام (مشاهد)',
-    role: 'viewer',
-    governorateId: 'gov-ismailia',
-    governorateIds: ['gov-ismailia'],
-    permissions: getDefaultGranularPermissions('viewer'),
-    isActive: true,
-  },
-};
+export const PREVIEW_USERS: Record<UserRole, UserProfile> = IS_PREVIEW_MODE_ENABLED
+  ? {
+      field_staff: {
+        uid: 'demo-field-staff',
+        email: 'field@dst-agri.eg',
+        displayName: 'م. كريم طارق (موظف ميداني)',
+        role: 'field_staff',
+        governorateId: 'gov-ismailia',
+        governorateIds: ['gov-ismailia'],
+        permissions: getDefaultGranularPermissions('field_staff'),
+        isActive: true,
+      },
+      supervisor: {
+        uid: 'demo-supervisor',
+        email: 'supervisor@dst-agri.eg',
+        displayName: 'م. سحر عبد المنعم (مشرف)',
+        role: 'supervisor',
+        governorateId: 'gov-ismailia',
+        governorateIds: ['gov-ismailia', 'gov-suez'],
+        permissions: getDefaultGranularPermissions('supervisor'),
+        isActive: true,
+      },
+      chief: {
+        uid: 'demo-chief',
+        email: 'chief@dst-agri.eg',
+        displayName: 'د. طارق الغمراوي (رئيس القطاع)',
+        role: 'chief',
+        permissions: getDefaultGranularPermissions('chief'),
+        isActive: true,
+      },
+      admin: {
+        uid: 'demo-admin',
+        email: 'admin@dst-agri.eg',
+        displayName: 'م. علاء السريدي (مدير النظام)',
+        role: 'admin',
+        permissions: getDefaultGranularPermissions('admin'),
+        isActive: true,
+      },
+      viewer: {
+        uid: 'demo-viewer',
+        email: 'viewer@dst-agri.eg',
+        displayName: 'أ. نورهان حسام (مشاهد)',
+        role: 'viewer',
+        governorateId: 'gov-ismailia',
+        governorateIds: ['gov-ismailia'],
+        permissions: getDefaultGranularPermissions('viewer'),
+        isActive: true,
+      },
+    }
+  : ({} as Record<UserRole, UserProfile>);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
@@ -118,13 +122,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }).catch(() => undefined);
         }
         return {
-          ...data,
           uid: user.uid,
           email: cleanEmail,
           displayName: data.displayName || displayName,
           role: resolvedRole,
+          ...(data.governorateId ? { governorateId: data.governorateId } : {}),
           governorateIds: Array.isArray(data.governorateIds) ? data.governorateIds : [],
           permissions: resolvedPerms,
+          ...(data.inviteId ? { inviteId: data.inviteId } : {}),
           isActive: data.isActive !== false || isBootstrapAdmin,
         };
       }
@@ -154,7 +159,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       try {
         inviteSnap = await getDoc(inviteRef);
       } catch {
-        // Non-existent or unreadable invite fails closed cleanly
         setAuthError(UNAUTHORIZED_MSG);
         await signOut(auth);
         return null;
@@ -226,7 +230,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const autoStart = params.get('autostart') === '1';
+    const autoStart = IS_PREVIEW_MODE_ENABLED && params.get('autostart') === '1';
 
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (user) {
@@ -246,6 +250,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       setFirebaseUser(null);
+
+      // In production builds, Google Auth is the sole authentication mechanism.
+      if (!IS_PREVIEW_MODE_ENABLED) {
+        setProfile(null);
+        setAuthMode('unauthenticated');
+        setLoading(false);
+        return;
+      }
+
       if (autoStart) {
         const preview = PREVIEW_USERS.admin;
         setProfile(preview);
@@ -288,13 +301,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setAuthError(
         msg.includes('popup-closed')
           ? 'تم إغلاق نافذة تسجيل الدخول قبل إتمام العملية.'
-          : 'تعذر إتمام تسجيل الدخول بحساب Google. يمكنك المحاولة مجددًا أو استخدام وضع المعاينة المحلية.',
+          : 'تعذر إتمام تسجيل الدخول بحساب Google. يُرجى المحاولة مجددًا.',
       );
       setLoading(false);
     }
   };
 
   const enterPreviewMode = async (role: UserRole = 'admin') => {
+    if (!IS_PREVIEW_MODE_ENABLED) {
+      setAuthError('وضع المعاينة المحلية معطّل في بيئة الإنتاج. يُرجى تسجيل الدخول بحساب Google.');
+      return;
+    }
     setAuthError(null);
     const chosen = PREVIEW_USERS[role] || PREVIEW_USERS.admin;
     setProfile(chosen);
@@ -303,54 +320,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     await saveSessionState('previewUserProfile', chosen);
   };
 
-  const signInWithLocalCredentials = async (email: string, password: string) => {
-    setAuthError(null);
-    const cleanEmail = email.trim().toLowerCase();
-    if (!cleanEmail || !password) {
-      setAuthError('يُرجى إدخال البريد الإلكتروني وكلمة المرور.');
-      return;
-    }
-
-    const localUsers = (await loadSessionState<UserProfile[]>('localPreviewUsers')) || Object.values(PREVIEW_USERS);
-    const matched = localUsers.find((u) => u.email.toLowerCase() === cleanEmail);
-    if (!matched) {
-      setAuthError('لا يوجد مستخدم مسجل محليًا بهذا البريد الإلكتروني.');
-      return;
-    }
-    if (!matched.isActive) {
-      setAuthError('هذا الحساب معطّل حاليًا. يُرجى مراجعة مدير النظام.');
-      return;
-    }
-    if (!matched.passwordHash) {
-      setAuthError('لم يتم تعيين كلمة مرور محلية لهذا الحساب. سجّل الدخول عبر Google أو اطلب من المدير تعيين كلمة مرور.');
-      return;
-    }
-    const candidateHash = await sha256Hex(password);
-    if (candidateHash !== matched.passwordHash) {
-      setAuthError('كلمة المرور غير صحيحة.');
-      return;
-    }
-
-    const { passwordHash: _omit, ...safeProfile } = matched;
-    setProfile(safeProfile);
-    setAuthMode('preview');
-    await saveSessionState('previewRole', safeProfile.role);
-    await saveSessionState('previewUserProfile', safeProfile);
-  };
-
   const switchPreviewRole = async (role: UserRole) => {
-    if (authMode !== 'preview') return;
+    if (!IS_PREVIEW_MODE_ENABLED || authMode !== 'preview') return;
     const chosen = PREVIEW_USERS[role];
+    if (!chosen) return;
     setProfile(chosen);
     await saveSessionState('previewRole', role);
     await saveSessionState('previewUserProfile', chosen);
   };
 
   const syncPreviewProfile = async (updatedUser: UserProfile) => {
+    if (!IS_PREVIEW_MODE_ENABLED) return;
     if (authMode === 'preview' && profile?.uid === updatedUser.uid) {
-      const { passwordHash: _omit, ...safe } = updatedUser;
-      setProfile(safe);
-      await saveSessionState('previewUserProfile', safe);
+      setProfile(updatedUser);
+      await saveSessionState('previewUserProfile', updatedUser);
     }
   };
 
@@ -378,9 +361,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         authMode,
         loading,
         authError,
+        isPreviewAllowed: IS_PREVIEW_MODE_ENABLED,
         signInWithGoogle,
         enterPreviewMode,
-        signInWithLocalCredentials,
         switchPreviewRole,
         syncPreviewProfile,
         logout,

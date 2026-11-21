@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Calculator,
@@ -12,7 +12,7 @@ import {
   ZoomOut,
 } from 'lucide-react';
 import { useAppData } from '../context/AppDataContext.tsx';
-import { useAuth } from '../context/AuthContext.tsx';
+import { IS_PREVIEW_MODE_ENABLED, useAuth } from '../context/AuthContext.tsx';
 import type { ManifestOcrExtractedData } from '../types/domain.ts';
 import { tonsToBags } from '../utils/calculations.ts';
 import { resizeImageForUpload } from '../utils/imageResize.ts';
@@ -32,6 +32,24 @@ export const ManifestOcrPanel: React.FC<ManifestOcrPanelProps> = ({ onApproveFil
   const [reviewOpen, setReviewOpen] = useState(false);
   const [draft, setDraft] = useState<ManifestOcrExtractedData | null>(null);
 
+  const selectedFert = useMemo(
+    () =>
+      draft?.fertilizerCode
+        ? fertilizerTypes.find((f) => f.code === draft.fertilizerCode) || null
+        : null,
+    [draft?.fertilizerCode, fertilizerTypes],
+  );
+
+  const bagWeightKg = selectedFert?.bagWeightKg;
+  const bagsPerTon =
+    typeof bagWeightKg === 'number' && Number.isFinite(bagWeightKg) && bagWeightKg > 0
+      ? Number((1000 / bagWeightKg).toFixed(2))
+      : null;
+
+  const isMissingFertilizer = !draft?.fertilizerCode;
+  const isMissingDate = !draft?.arrivalDate?.trim();
+  const canApproveDraft = Boolean(draft && !isMissingFertilizer && !isMissingDate);
+
   const handleFileSelected = async (file: File) => {
     setProcessing(true);
     try {
@@ -40,7 +58,7 @@ export const ManifestOcrPanel: React.FC<ManifestOcrPanelProps> = ({ onApproveFil
 
       if (authMode !== 'firebase') {
         throw new Error(
-          'قراءة البوليصة الفعلية عبر Gemini Vision تتطلب تسجيل الدخول بحساب Google المعتمد. يمكنك استخدام زر «نموذج بوليصة تجريبي» لاختبار نافذة المراجعة.',
+          'قراءة البوليصة الفعلية عبر Gemini Vision تتطلب تسجيل الدخول بحساب Google المعتمد.',
         );
       }
 
@@ -64,6 +82,7 @@ export const ManifestOcrPanel: React.FC<ManifestOcrPanelProps> = ({ onApproveFil
   };
 
   const openSampleManifestReview = () => {
+    if (!IS_PREVIEW_MODE_ENABLED) return;
     const canvas = document.createElement('canvas');
     canvas.width = 860;
     canvas.height = 520;
@@ -80,7 +99,7 @@ export const ManifestOcrPanel: React.FC<ManifestOcrPanelProps> = ({ onApproveFil
       ctx.fillStyle = '#1e293b';
       ctx.font = '18px sans-serif';
       ctx.fillText('المحافظة: الإسماعيلية   |   الجمعية المستلمة: جمعية الضبعية الزراعية', 120, 145);
-      ctx.fillText('الصنف: يوريا 46.5%   |   الوزن بالطن: 15 طن (تحتاج تحويل ×20)', 120, 205);
+      ctx.fillText('الصنف: يوريا 46.5%   |   الوزن بالطن: 15 طن', 120, 205);
       ctx.fillText('رقم الجرار / السيارة: ط ص م 5518   |   السائق: علي حسن إبراهيم', 120, 265);
       ctx.fillText('جهة التوريد: مصنع موبكو للأسمدة - دمياط', 120, 325);
     }
@@ -93,13 +112,13 @@ export const ManifestOcrPanel: React.FC<ManifestOcrPanelProps> = ({ onApproveFil
     setZoom(1);
     setDraft({
       manifestNumber: 'BL-2026-9042',
-      arrivalDate: new Date().toISOString().slice(0, 10),
+      arrivalDate: '',
       arrivalTime: '10:30',
       governorateName: 'الإسماعيلية',
       matchedGovernorateId: sampleAssoc?.governorateId || 'gov-ismailia',
       associationName: sampleAssoc?.nameAr || 'الضبعية',
       matchedAssociationId: sampleAssoc?.id || null,
-      fertilizerCode: 'urea',
+      fertilizerCode: null,
       manifestBags: null,
       weightTons: 15,
       tractorPlate: 'ط ص م 5518',
@@ -108,21 +127,50 @@ export const ManifestOcrPanel: React.FC<ManifestOcrPanelProps> = ({ onApproveFil
       driverNationalId: '28805141901122',
       supplySource: 'مصنع موبكو للأسمدة - دمياط',
       confidence: 0.92,
-      warnings: ['عدد الشكاير غير مكتوب صراحة؛ استخدم زر تحويل الطن إلى شكاير (×20).'],
+      warnings: [
+        'يجب اختيار نوع السماد وتاريخ الوصول يدويًا قبل الاعتماد.',
+        'عدد الشكاير غير مكتوب صراحة؛ استخدم زر تحويل الطن إلى شكاير بعد تحديد الصنف.',
+      ],
     });
     setReviewOpen(true);
   };
 
   const handleConvertTons = () => {
     if (!draft || draft.weightTons === null) return;
+    if (!draft.fertilizerCode) {
+      pushToast({
+        type: 'warning',
+        title: 'اختر نوع السماد أولًا',
+        description: 'لا يمكن تحويل الطن إلى شكاير قبل تحديد نوع السماد لمعرفة وزن الشيكارة الفعلي.',
+      });
+      return;
+    }
+    const converted = tonsToBags(draft.weightTons, bagWeightKg);
+    if (converted === null) {
+      pushToast({
+        type: 'warning',
+        title: 'وزن الشيكارة غير معرّف',
+        description:
+          'لم يُعرَّف وزن الشيكارة (bagWeightKg) لهذا الصنف في إعدادات الأصناف؛ تعذّر التحويل التلقائي ويجب إدخال عدد الشكاير يدويًا.',
+      });
+      return;
+    }
     setDraft({
       ...draft,
-      manifestBags: tonsToBags(draft.weightTons),
+      manifestBags: converted,
     });
   };
 
   const handleApproveAndFill = () => {
     if (!draft) return;
+    if (!draft.fertilizerCode || !draft.arrivalDate.trim()) {
+      pushToast({
+        type: 'warning',
+        title: 'حقول إلزامية ناقصة',
+        description: 'يجب تحديد نوع السماد وتاريخ الوصول قبل اعتماد وتعبئة بيانات البوليصة.',
+      });
+      return;
+    }
     onApproveFill(draft, imageDataUrl);
     setReviewOpen(false);
     pushToast({
@@ -137,7 +185,7 @@ export const ManifestOcrPanel: React.FC<ManifestOcrPanelProps> = ({ onApproveFil
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/*"
+        accept="image/jpeg,image/png,image/webp"
         capture="environment"
         className="hidden"
         onChange={(e) => {
@@ -157,14 +205,16 @@ export const ManifestOcrPanel: React.FC<ManifestOcrPanelProps> = ({ onApproveFil
         <span>{processing ? 'جارٍ قراءة البوليصة...' : 'قراءة بوليصة بالـ OCR'}</span>
       </button>
 
-      <button
-        type="button"
-        onClick={openSampleManifestReview}
-        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap"
-      >
-        <Eye className="w-3.5 h-3.5" />
-        <span>نموذج بوليصة تجريبي</span>
-      </button>
+      {IS_PREVIEW_MODE_ENABLED && (
+        <button
+          type="button"
+          onClick={openSampleManifestReview}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap"
+        >
+          <Eye className="w-3.5 h-3.5" />
+          <span>نموذج بوليصة تجريبي</span>
+        </button>
+      )}
 
       {reviewOpen && draft && (
         <div
@@ -267,12 +317,22 @@ export const ManifestOcrPanel: React.FC<ManifestOcrPanelProps> = ({ onApproveFil
                 </label>
 
                 <label className="space-y-1">
-                  <span className="font-semibold text-slate-700">تاريخ الوصول</span>
+                  <span className="font-semibold text-slate-700 flex items-center justify-between">
+                    <span>تاريخ الوصول *</span>
+                    {isMissingDate && (
+                      <span className="text-[11px] font-bold text-rose-700">⚠ مطلوب</span>
+                    )}
+                  </span>
                   <input
                     type="date"
+                    required
                     value={draft.arrivalDate}
                     onChange={(e) => setDraft({ ...draft, arrivalDate: e.target.value })}
-                    className="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono-num"
+                    className={`w-full rounded-lg border px-3 py-2 font-mono-num ${
+                      isMissingDate
+                        ? 'border-rose-400 bg-rose-50 ring-1 ring-rose-300'
+                        : 'border-slate-300 bg-white'
+                    }`}
                   />
                 </label>
 
@@ -329,15 +389,28 @@ export const ManifestOcrPanel: React.FC<ManifestOcrPanelProps> = ({ onApproveFil
                 </label>
 
                 <label className="space-y-1">
-                  <span className="font-semibold text-slate-700">نوع السماد</span>
+                  <span className="font-semibold text-slate-700 flex items-center justify-between">
+                    <span>نوع السماد *</span>
+                    {isMissingFertilizer && (
+                      <span className="text-[11px] font-bold text-rose-700">⚠ غير محدد</span>
+                    )}
+                  </span>
                   <select
-                    value={draft.fertilizerCode}
-                    onChange={(e) => setDraft({ ...draft, fertilizerCode: e.target.value })}
-                    className="w-full rounded-lg border border-slate-300 px-3 py-2"
+                    required
+                    value={draft.fertilizerCode || ''}
+                    onChange={(e) =>
+                      setDraft({ ...draft, fertilizerCode: e.target.value || null })
+                    }
+                    className={`w-full rounded-lg border px-3 py-2 ${
+                      isMissingFertilizer
+                        ? 'border-rose-400 bg-rose-50 ring-1 ring-rose-300'
+                        : 'border-slate-300 bg-white'
+                    }`}
                   >
+                    <option value="">— اختر نوع السماد —</option>
                     {fertilizerTypes.map((f) => (
                       <option key={f.code} value={f.code}>
-                        {f.nameAr}
+                        {f.nameAr} {f.bagWeightKg ? `(${f.bagWeightKg} كجم/شيكارة)` : ''}
                       </option>
                     ))}
                   </select>
@@ -371,12 +444,17 @@ export const ManifestOcrPanel: React.FC<ManifestOcrPanelProps> = ({ onApproveFil
                     />
                     <button
                       type="button"
-                      disabled={draft.weightTons === null}
+                      disabled={draft.weightTons === null || !draft.fertilizerCode}
                       onClick={handleConvertTons}
+                      title={
+                        bagsPerTon
+                          ? `تحويل بناءً على وزن الشيكارة (${bagWeightKg} كجم = ${bagsPerTon} شيكارة/طن)`
+                          : 'حدد نوع السماد أولًا لحساب معامل التحويل من وزن الشيكارة'
+                      }
                       className="inline-flex items-center gap-1 rounded-lg bg-emerald-50 border border-emerald-300 px-2.5 py-2 text-[11px] font-bold text-emerald-900 hover:bg-emerald-100 disabled:opacity-50 whitespace-nowrap"
                     >
                       <Calculator className="w-3.5 h-3.5" />
-                      تحويل لشكاير (×20)
+                      {bagsPerTon ? `تحويل لشكاير (×${bagsPerTon})` : 'تحويل لشكاير'}
                     </button>
                   </div>
                 </div>
@@ -434,22 +512,38 @@ export const ManifestOcrPanel: React.FC<ManifestOcrPanelProps> = ({ onApproveFil
               </div>
             </div>
 
-            <div className="px-5 py-3.5 border-t border-slate-200 bg-slate-50 flex items-center justify-end gap-2.5">
-              <button
-                type="button"
-                onClick={() => setReviewOpen(false)}
-                className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100"
-              >
-                إلغاء
-              </button>
-              <button
-                type="button"
-                onClick={handleApproveAndFill}
-                className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-800"
-              >
-                <Check className="w-4 h-4" />
-                اعتماد وتعبئة البيانات في النموذج
-              </button>
+            <div className="px-5 py-3.5 border-t border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-2.5">
+              <div className="text-xs font-semibold text-rose-700">
+                {!canApproveDraft && (
+                  <span>
+                    ⚠ لا يمكن الاعتماد قبل تحديد:{' '}
+                    {[
+                      isMissingFertilizer ? 'نوع السماد' : '',
+                      isMissingDate ? 'تاريخ الوصول' : '',
+                    ]
+                      .filter(Boolean)
+                      .join(' و')}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setReviewOpen(false)}
+                  className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="button"
+                  disabled={!canApproveDraft}
+                  onClick={handleApproveAndFill}
+                  className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Check className="w-4 h-4" />
+                  اعتماد وتعبئة البيانات في النموذج
+                </button>
+              </div>
             </div>
           </div>
         </div>

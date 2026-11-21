@@ -459,8 +459,8 @@ export const SEED_IMAGE_ATTACHMENTS: ImageAttachmentRecord[] = [];
 export const SEED_SYSTEM_SETTINGS: SystemSettings = {
   id: 'global',
   requireDriverNationalId: true,
-  centralApiUrl: 'https://central-agri.gov.eg/api/v2/fertilizer-reports',
-  autoSyncOnApproval: true,
+  centralApiUrl: '',
+  autoSyncOnApproval: false,
   organizationNameAr: 'منظومة DST للرقابة الزراعية وتوزيع الأسمدة',
   treatEmptyAsZero: false,
   minThresholds: {

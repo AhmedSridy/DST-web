@@ -17,10 +17,14 @@ export const ApprovalsAndCentralView: React.FC = () => {
     reports,
     approvals,
     integrationLogs,
+    settings,
     transitionReportStatus,
     syncReportCentral,
     pushToast,
   } = useAppData();
+
+  const hasCentralApiUrl = Boolean(settings.centralApiUrl?.trim());
+  const [syncingReportId, setSyncingReportId] = useState<string | null>(null);
 
   const visibleGovIds = useMemo(
     () => new Set(getVisibleGovernorates(profile, governorates).map((g) => g.id)),
@@ -55,6 +59,15 @@ export const ApprovalsAndCentralView: React.FC = () => {
   };
 
   const handleSyncCentral = async (reportId: string) => {
+    if (!hasCentralApiUrl) {
+      pushToast({
+        type: 'warning',
+        title: 'الربط المركزي غير مُعدّ',
+        description: 'يُرجى إعداد رابط واجهة التكامل المركزية (HTTPS) من لوحة إعدادات المنظومة أولًا.',
+      });
+      return;
+    }
+    setSyncingReportId(reportId);
     try {
       await syncReportCentral(reportId);
     } catch (error: unknown) {
@@ -63,18 +76,31 @@ export const ApprovalsAndCentralView: React.FC = () => {
         title: 'تعذر الإرسال المركزي',
         description: error instanceof Error ? error.message : 'حدث خطأ أثناء الإرسال.',
       });
+    } finally {
+      setSyncingReportId(null);
     }
   };
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-xl font-bold text-slate-900 dark:text-slate-100">
-          مركز الاعتمادات والربط بالمنظومة المركزية
-        </h2>
-        <p className="text-sm text-slate-600 dark:text-slate-400 mt-0.5">
-          دورة اعتماد التقارير اليومية (مسودة ← مكتمل ← قيد المراجعة ← معتمد / مرفوض) وتوثيق الإرسال المركزي
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <h2 className="text-xl font-bold text-slate-900 dark:text-slate-100">
+            مركز الاعتمادات والربط بالمنظومة المركزية
+          </h2>
+          <p className="text-sm text-slate-600 dark:text-slate-400 mt-0.5">
+            دورة اعتماد التقارير اليومية (مسودة ← مكتمل ← قيد المراجعة ← معتمد / مرفوض) وتوثيق الإرسال المركزي الفعلي
+          </p>
+        </div>
+        <div
+          className={`rounded-lg border px-3 py-1.5 text-xs font-bold whitespace-nowrap ${
+            hasCentralApiUrl
+              ? 'border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-200'
+              : 'border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-200'
+          }`}
+        >
+          حالة رابط التكامل المركزي: {hasCentralApiUrl ? '✔ مُعدّ (HTTPS)' : '⚠ غير مُعدّ'}
+        </div>
       </div>
 
       {/* Reports Workflow Table */}
@@ -109,12 +135,36 @@ export const ApprovalsAndCentralView: React.FC = () => {
                   const role = profile?.role || 'field_staff';
                   const canComplete = canTransitionReportStatus(rep.status, 'completed', role);
                   const canReview = canTransitionReportStatus(rep.status, 'under_review', role);
-                  const canApprove = canTransitionReportStatus(rep.status, 'approved', role);
+                  const canApprove = canTransitionReportStatus(rep.status, 'approved', role, {
+                    actorUid: profile?.uid,
+                    reportCreatedByUid: rep.createdByUid,
+                  });
                   const canReject = canTransitionReportStatus(rep.status, 'rejected', role);
-                  const canSendCentral =
+                  const canSendCentralRole =
                     rep.status === 'approved' &&
                     (role === 'chief' || role === 'admin') &&
                     rep.centralSyncStatus !== 'synced';
+
+                  const syncBadge =
+                    rep.centralSyncStatus === 'synced'
+                      ? {
+                          label: '✔ تم الإرسال',
+                          cls: 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800',
+                        }
+                      : !hasCentralApiUrl
+                        ? {
+                            label: 'غير مُعدّ',
+                            cls: 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border border-slate-200 dark:border-slate-700',
+                          }
+                        : rep.centralSyncStatus === 'failed'
+                          ? {
+                              label: '⚠ فشل الإرسال',
+                              cls: 'bg-rose-50 dark:bg-rose-950/50 text-rose-800 dark:text-rose-300 border border-rose-200 dark:border-rose-800',
+                            }
+                          : {
+                              label: 'قيد الانتظار',
+                              cls: 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300',
+                            };
 
                   return (
                     <tr key={rep.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
@@ -136,14 +186,8 @@ export const ApprovalsAndCentralView: React.FC = () => {
                         </span>
                       </td>
                       <td className="px-3 py-3 text-center">
-                        <span
-                          className={`inline-block rounded px-2 py-0.5 font-semibold ${
-                            rep.centralSyncStatus === 'synced'
-                              ? 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
-                              : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
-                          }`}
-                        >
-                          {rep.centralSyncStatus === 'synced' ? '✔ تم الإرسال' : 'قيد الانتظار'}
+                        <span className={`inline-block rounded px-2 py-0.5 font-semibold ${syncBadge.cls}`}>
+                          {syncBadge.label}
                         </span>
                       </td>
                       <td className="px-3 py-3 text-slate-600 dark:text-slate-300 max-w-xs">
@@ -197,14 +241,24 @@ export const ApprovalsAndCentralView: React.FC = () => {
                               رفض
                             </button>
                           )}
-                          {canSendCentral && (
+                          {canSendCentralRole && (
                             <button
                               type="button"
+                              disabled={!hasCentralApiUrl || syncingReportId === rep.id}
+                              title={
+                                hasCentralApiUrl
+                                  ? 'إرسال التقرير عبر HTTP إلى الخادم المركزي'
+                                  : 'رابط التكامل المركزي غير مُعدّ'
+                              }
                               onClick={() => void handleSyncCentral(rep.id)}
-                              className="inline-flex items-center gap-1 rounded bg-slate-900 px-2.5 py-1.5 text-[11px] font-bold text-white hover:bg-slate-800"
+                              className="inline-flex items-center gap-1 rounded bg-slate-900 px-2.5 py-1.5 text-[11px] font-bold text-white hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed"
                             >
                               <CloudUpload className="w-3 h-3" />
-                              إرسال مركزي
+                              {syncingReportId === rep.id
+                                ? 'جارٍ الإرسال...'
+                                : hasCentralApiUrl
+                                  ? 'إرسال مركزي'
+                                  : 'غير مُعدّ'}
                             </button>
                           )}
                         </div>
@@ -223,26 +277,32 @@ export const ApprovalsAndCentralView: React.FC = () => {
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl p-5 space-y-3">
           <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">سجل حركة الاعتمادات</h3>
           <div className="divide-y divide-slate-100 dark:divide-slate-800 max-h-80 overflow-y-auto">
-            {approvals.map((app) => {
-              const gov = governorates.find((g) => g.id === app.governorateId);
-              return (
-                <div key={app.id} className="py-2.5 text-xs space-y-1">
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-slate-900 dark:text-slate-100">
-                      {gov?.nameAr} ({app.reportDate})
-                    </span>
-                    <span className="font-mono-num text-[11px] text-slate-500 dark:text-slate-400">
-                      {app.createdAt.slice(0, 16).replace('T', ' ')}
-                    </span>
+            {approvals.length === 0 ? (
+              <p className="py-6 text-center text-xs text-slate-500 dark:text-slate-400">
+                لا توجد حركات اعتماد مسجلة بعد.
+              </p>
+            ) : (
+              approvals.map((app) => {
+                const gov = governorates.find((g) => g.id === app.governorateId);
+                return (
+                  <div key={app.id} className="py-2.5 text-xs space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-slate-900 dark:text-slate-100">
+                        {gov?.nameAr} ({app.reportDate})
+                      </span>
+                      <span className="font-mono-num text-[11px] text-slate-500 dark:text-slate-400">
+                        {app.createdAt.slice(0, 16).replace('T', ' ')}
+                      </span>
+                    </div>
+                    <p className="text-slate-700 dark:text-slate-300">
+                      {app.actorName} ({ROLE_LABELS_AR[app.actorRole]}) · {STATUS_LABELS_AR[app.fromStatus]} ←{' '}
+                      <span className="font-semibold">{STATUS_LABELS_AR[app.toStatus]}</span>
+                    </p>
+                    <p className="text-slate-500 dark:text-slate-400">{app.notes}</p>
                   </div>
-                  <p className="text-slate-700 dark:text-slate-300">
-                    {app.actorName} ({ROLE_LABELS_AR[app.actorRole]}) · {STATUS_LABELS_AR[app.fromStatus]} ←{' '}
-                    <span className="font-semibold">{STATUS_LABELS_AR[app.toStatus]}</span>
-                  </p>
-                  <p className="text-slate-500 dark:text-slate-400">{app.notes}</p>
-                </div>
-              );
-            })}
+                );
+              })
+            )}
           </div>
         </div>
 
@@ -251,23 +311,38 @@ export const ApprovalsAndCentralView: React.FC = () => {
             سجلات التكامل مع المنظومة المركزية
           </h3>
           <div className="divide-y divide-slate-100 dark:divide-slate-800 max-h-80 overflow-y-auto">
-            {integrationLogs.map((log) => {
-              const gov = governorates.find((g) => g.id === log.governorateId);
-              return (
-                <div key={log.id} className="py-2.5 text-xs space-y-1">
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-slate-900 dark:text-slate-100">
-                      {gov?.nameAr} · HTTP <span className="font-mono-num">{log.httpStatus}</span>
-                    </span>
-                    <span className="rounded bg-emerald-50 dark:bg-emerald-950/50 px-2 py-0.5 text-[11px] font-semibold text-emerald-800 dark:text-emerald-300">
-                      {log.status === 'success' ? '✔ ناجح' : '⚠ فشل'}
-                    </span>
+            {integrationLogs.length === 0 ? (
+              <p className="py-6 text-center text-xs text-slate-500 dark:text-slate-400">
+                {hasCentralApiUrl
+                  ? 'لا توجد محاولات إرسال مسجلة بعد.'
+                  : 'رابط التكامل المركزي غير مُعدّ؛ لم تُنفَّذ أي عمليات إرسال خارجية.'}
+              </p>
+            ) : (
+              integrationLogs.map((log) => {
+                const gov = governorates.find((g) => g.id === log.governorateId);
+                const isOk = log.status === 'success';
+                return (
+                  <div key={log.id} className="py-2.5 text-xs space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-slate-900 dark:text-slate-100">
+                        {gov?.nameAr} · HTTP <span className="font-mono-num">{log.httpStatus}</span>
+                      </span>
+                      <span
+                        className={`rounded px-2 py-0.5 text-[11px] font-semibold ${
+                          isOk
+                            ? 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-800 dark:text-emerald-300'
+                            : 'bg-rose-50 dark:bg-rose-950/50 text-rose-800 dark:text-rose-300'
+                        }`}
+                      >
+                        {isOk ? '✔ ناجح' : '⚠ فشل'}
+                      </span>
+                    </div>
+                    <p className="text-slate-700 dark:text-slate-300">{log.payloadSummary}</p>
+                    <p className="text-slate-500 dark:text-slate-400">{log.responseMessage}</p>
                   </div>
-                  <p className="text-slate-700 dark:text-slate-300">{log.payloadSummary}</p>
-                  <p className="text-slate-500 dark:text-slate-400">{log.responseMessage}</p>
-                </div>
-              );
-            })}
+                );
+              })
+            )}
           </div>
         </div>
       </div>
