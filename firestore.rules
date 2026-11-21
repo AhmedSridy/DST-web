@@ -650,7 +650,8 @@ service cloud.firestore {
         (isAdmin() || isChief() || canApproveInGov(incoming().governorateId)) &&
         incoming().dispatchedByUid == request.auth.uid &&
         (!('createdAt' in incoming()) || incoming().createdAt == request.time);
-      allow update, delete: if false;
+      allow update: if isValidId(logId) && isAdmin() && isValidIntegrationLog(incoming());
+      allow delete: if isValidId(logId) && isAdmin();
     }
 
     // Image OCR Attachments (Governorate-scoped)
@@ -664,11 +665,11 @@ service cloud.firestore {
         canEditInGov(incoming().governorateId) &&
         incoming().analyzedByUid == request.auth.uid &&
         (!('createdAt' in incoming()) || incoming().createdAt == request.time);
-      allow update: if false;
+      allow update: if isValidId(attachmentId) && isAdmin() && isValidImageAttachment(incoming());
       allow delete: if isValidId(attachmentId) && isAdmin();
     }
 
-    // Agricultural Associations (Governorate-scoped; soft-deactivate only — NO hard deletes)
+    // Agricultural Associations (Governorate-scoped; soft-deactivate for managers, hard delete for admin only)
     match /agricultural_associations/{associationId} {
       allow get: if isValidId(associationId) && isActiveCaller() && userCanAccessGov(existing().governorateId);
       allow list: if isUnrestrictedGovCaller() || (
@@ -688,7 +689,7 @@ service cloud.firestore {
             'capacity', 'notes', 'sortOrder', 'isActive', 'active', 'updatedAt'
           ])
         );
-      allow delete: if false;
+      allow delete: if isValidId(associationId) && isAdmin();
     }
 
     // Per-governorate normalized name uniqueness locks
@@ -703,8 +704,9 @@ service cloud.firestore {
       allow update: if isValidId(lockId) && isActiveCaller() && isValidAssociationNameLock(incoming()) &&
         incoming().governorateId == existing().governorateId &&
         canManageAssociationsInGov(existing().governorateId);
-      allow delete: if isValidId(lockId) && isActiveCaller() &&
-        canManageAssociationsInGov(existing().governorateId);
+      allow delete: if isValidId(lockId) && isActiveCaller() && (
+        isAdmin() || (resource != null && canManageAssociationsInGov(existing().governorateId))
+      );
     }
 
     // Reference Catalogs

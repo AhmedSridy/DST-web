@@ -492,3 +492,55 @@ export function computeLowBalanceAlerts(params: {
     truncated: allAlerts.length > maxRows,
   };
 }
+
+export function getGovernoratesWithActiveAssociations(
+  governorates: Governorate[],
+  associations: AgriculturalAssociation[],
+): Governorate[] {
+  const activeGovIds = new Set(
+    associations.filter((a) => a.isActive).map((a) => a.governorateId),
+  );
+  return governorates.filter((g) => activeGovIds.has(g.id));
+}
+
+export interface DashboardGovChartPoint {
+  governorateId: string;
+  name: string;
+  المنصرف: number;
+  التسوية: number;
+}
+
+/**
+ * Returns chart points ONLY for governorates that have at least one active association.
+ * Historical total disbursed/settlement for each visible governorate includes all of its
+ * existing records (including soft-deactivated associations), while permanently deleted
+ * associations' records are gone from disbursements.
+ */
+export function computeDashboardGovChartData(params: {
+  governorates: Governorate[];
+  associations: AgriculturalAssociation[];
+  reports: DailyReport[];
+  disbursements: DailyDisbursementRow[];
+}): DashboardGovChartPoint[] {
+  const activeGovs = getGovernoratesWithActiveAssociations(
+    params.governorates,
+    params.associations,
+  );
+  return activeGovs.map((gov) => {
+    const govRepIds = new Set(
+      params.reports.filter((r) => r.governorateId === gov.id).map((r) => r.id),
+    );
+    const govRows = params.disbursements.filter(
+      (d) => govRepIds.has(d.reportId) || d.governorateId === gov.id,
+    );
+    const disbursed = govRows.reduce((s, r) => s + (r.actualDisbursed || 0), 0);
+    const settled = govRows.reduce((s, r) => s + (r.settlementQty || 0), 0);
+    return {
+      governorateId: gov.id,
+      name: gov.nameAr,
+      المنصرف: disbursed,
+      التسوية: settled,
+    };
+  });
+}
+

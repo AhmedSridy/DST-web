@@ -215,7 +215,7 @@ export async function exportToExcel(ctx: ExportDocumentContext): Promise<string>
     const reasons = [item.urea.reason, item.nitrate.reason, item.sulfate.reason]
       .filter((r) => r.trim().length > 0)
       .join(' | ');
-    row.getCell(18).value = reasons || (anyVariance ? 'غير مبرر' : '—');
+    row.getCell(18).value = reasons || (anyVariance ? 'بدون توضيح' : '—');
 
     for (let c = 1; c <= 18; c++) {
       const cell = row.getCell(c);
@@ -317,7 +317,7 @@ export async function exportToExcel(ctx: ExportDocumentContext): Promise<string>
     const matched = tr.inspectionStatus === 'matched' && tr.bagVariance === 0;
 
     row.getCell(1).value = tr.arrivalDate;
-    row.getCell(2).value = assoc?.nameAr || tr.associationId;
+    row.getCell(2).value = assoc?.nameAr || 'جمعية محذوفة';
     row.getCell(3).value = tr.tractorPlate;
     row.getCell(4).value = tr.manifestNumber;
     row.getCell(5).value = fert?.nameAr || tr.fertilizerCode;
@@ -742,7 +742,7 @@ export async function exportToWord(
               fert?.nameAr || tr.fertilizerCode,
               tr.manifestNumber,
               tr.tractorPlate,
-              assoc?.nameAr || tr.associationId,
+              assoc?.nameAr || 'جمعية محذوفة',
               tr.arrivalDate,
             ];
             return new TableRow({
@@ -1126,7 +1126,7 @@ export async function exportToPdf(
             const rowEl = document.createElement('tr');
             const cells: Array<[string, 'right' | 'center', boolean]> = [
               [tr.arrivalDate, 'center', false],
-              [assoc?.nameAr || tr.associationId, 'right', true],
+              [assoc?.nameAr || 'جمعية محذوفة', 'right', true],
               [tr.tractorPlate, 'center', false],
               [tr.manifestNumber, 'center', false],
               [fert?.nameAr || tr.fertilizerCode, 'center', false],

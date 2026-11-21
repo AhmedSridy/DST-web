@@ -104,6 +104,9 @@ export const DailyDisbursementSheet: React.FC<DailyDisbursementSheetProps> = ({
   const [saving, setSaving] = useState(false);
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
+  const [reopenConfirmOpen, setReopenConfirmOpen] = useState(false);
+  const [reopenNote, setReopenNote] = useState('');
+  const [isReopening, setIsReopening] = useState(false);
   const [undoSnapshot, setUndoSnapshot] = useState<DeletedDaySnapshot | null>(null);
   const [undoSecondsLeft, setUndoSecondsLeft] = useState<number>(0);
   const [activeRawInput, setActiveRawInput] = useState<{ key: string; raw: string } | null>(null);
@@ -353,19 +356,6 @@ export const DailyDisbursementSheet: React.FC<DailyDisbursementSheetProps> = ({
 
   const handleSaveSheet = async () => {
     const payloadRows = buildPayloadRows();
-    for (const row of payloadRows) {
-      const calc = computeDisbursementRow(row, settings.treatEmptyAsZero);
-      if (calc.hasVariance && !row.varianceReason.trim()) {
-        const assoc = dayAssociations.find((a) => a.id === row.associationId);
-        const fert = orderedFertilizers.find((f) => f.code === row.fertilizerCode);
-        pushToast({
-          type: 'error',
-          title: 'سبب الفرق مطلوب',
-          description: `يوجد فرق تسوية (${calc.variance}) في جمعية ${assoc?.nameAr || ''} (${fert?.nameAr || ''}). يُرجى توضيح السبب قبل الحفظ.`,
-        });
-        return;
-      }
-    }
 
     setSaving(true);
     try {
@@ -399,6 +389,28 @@ export const DailyDisbursementSheet: React.FC<DailyDisbursementSheetProps> = ({
         title: 'تعذر تغيير الحالة',
         description: error instanceof Error ? error.message : 'يرجى التحقق من حالة التقرير.',
       });
+    }
+  };
+
+  const handleReopenReport = async () => {
+    if (!currentReport || isReopening) return;
+    setIsReopening(true);
+    try {
+      await transitionReportStatus(
+        currentReport.id,
+        'draft',
+        reopenNote.trim() || 'إعادة فتح التقرير المعتمد للتصحيح من مدير النظام',
+      );
+      setReopenConfirmOpen(false);
+      setReopenNote('');
+    } catch (error: unknown) {
+      pushToast({
+        type: 'error',
+        title: 'تعذر إعادة فتح التقرير',
+        description: error instanceof Error ? error.message : 'تحقق من صلاحيات مدير النظام.',
+      });
+    } finally {
+      setIsReopening(false);
     }
   };
 
@@ -678,6 +690,19 @@ export const DailyDisbursementSheet: React.FC<DailyDisbursementSheetProps> = ({
           )}
           {canEdit && (
             <>
+              {profile?.role === 'admin' && currentReport?.status === 'approved' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReopenNote('');
+                    setReopenConfirmOpen(true);
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/50 px-3.5 py-2 text-xs font-bold text-amber-900 dark:text-amber-200 hover:bg-amber-100 dark:hover:bg-amber-900/50 transition-colors"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  إعادة فتح التقرير
+                </button>
+              )}
               <button
                 type="button"
                 disabled={saving}
@@ -1204,14 +1229,14 @@ export const DailyDisbursementSheet: React.FC<DailyDisbursementSheetProps> = ({
                           }}
                           type="text"
                           disabled={!canEdit}
-                          placeholder={anyVariance ? 'سبب الفرق (إلزامي)...' : 'ملاحظات أو لا يوجد فرق'}
+                          placeholder={anyVariance ? 'سبب الفرق (اختياري)...' : 'ملاحظات أو لا يوجد فرق'}
                           aria-label={`ملاحظات وسبب الفرق ${assoc.nameAr}`}
                           value={rowReason}
                           onChange={(e) => updateRowReason(assoc.id, e.target.value)}
                           onKeyDown={(e) => handleGridKeyDown(e, rowIdx, 'row:reason')}
                           className={`w-full rounded border px-2 py-1.5 text-xs focus:outline-none disabled:bg-slate-100 dark:disabled:bg-slate-800/50 ${
                             anyVariance && !rowReason.trim()
-                              ? 'border-rose-400 bg-rose-50 dark:bg-rose-950/50 text-rose-900 dark:text-rose-200'
+                              ? 'border-amber-300 bg-amber-50/60 dark:border-amber-700 dark:bg-amber-950/30 text-slate-800 dark:text-slate-100'
                               : 'border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100'
                           }`}
                         />
@@ -1423,12 +1448,12 @@ export const DailyDisbursementSheet: React.FC<DailyDisbursementSheetProps> = ({
                   <input
                     type="text"
                     disabled={!canEdit}
-                    placeholder={anyVar ? 'سبب الفرق (إلزامي)...' : 'ملاحظات أو سبب الفرق'}
+                    placeholder={anyVar ? 'سبب الفرق (اختياري)...' : 'ملاحظات أو لا يوجد فرق'}
                     value={rowReason}
                     onChange={(e) => updateRowReason(assoc.id, e.target.value)}
                     className={`w-full min-h-[48px] rounded-lg border px-3 py-2 text-xs ${
                       anyVar && !rowReason.trim()
-                        ? 'border-rose-400 bg-rose-50 dark:bg-rose-950/50 text-rose-900 dark:text-rose-200'
+                        ? 'border-amber-300 bg-amber-50/60 dark:border-amber-700 dark:bg-amber-950/30 text-slate-800 dark:text-slate-100'
                         : 'border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 dark:text-slate-100'
                     }`}
                   />
@@ -1456,6 +1481,26 @@ export const DailyDisbursementSheet: React.FC<DailyDisbursementSheetProps> = ({
         confirmLabel="مسح سجل اليوم"
         onCancel={() => setClearConfirmOpen(false)}
         onConfirm={() => void handleClearToday()}
+      />
+
+      <ConfirmDialog
+        open={reopenConfirmOpen}
+        title="إعادة فتح التقرير المعتمد"
+        message={`سيتم تحويل حالة التقرير اليومي لمحافظة «${currentGov?.nameAr || ''}» بتاريخ ${selectedDate} من «معتمد» إلى «مسودة» لتصحيح البيانات وإعادة الاعتماد، مع توثيق العملية في سجل الاعتمادات وسجل التدقيق.`}
+        reasonLabel="ملاحظة إعادة الفتح (اختياري)"
+        reasonPlaceholder="مثال: تصحيح رصيد جمعية بعد المراجعة الميدانية..."
+        reasonValue={reopenNote}
+        onReasonChange={setReopenNote}
+        confirmLabel={isReopening ? 'جارٍ التنفيذ...' : 'تأكيد إعادة الفتح'}
+        cancelLabel="إلغاء"
+        variant="primary"
+        isSubmitting={isReopening}
+        onCancel={() => {
+          if (isReopening) return;
+          setReopenConfirmOpen(false);
+          setReopenNote('');
+        }}
+        onConfirm={() => void handleReopenReport()}
       />
     </div>
   );

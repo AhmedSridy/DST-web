@@ -216,6 +216,32 @@ async function commitBatchedWrites(
   }
 }
 
+async function commitBatchedWritesWithProgress(
+  ops: Array<(batch: ReturnType<typeof writeBatch>) => void>,
+  chunkSize = 380,
+): Promise<{ committedOps: number; totalOps: number }> {
+  const safeChunk = Math.min(Math.max(1, chunkSize), 400);
+  let committedOps = 0;
+  for (let i = 0; i < ops.length; i += safeChunk) {
+    const batch = writeBatch(db);
+    const slice = ops.slice(i, i + safeChunk);
+    for (const fn of slice) {
+      fn(batch);
+    }
+    try {
+      await batch.commit();
+      committedOps += slice.length;
+    } catch (err) {
+      const remaining = ops.length - committedOps;
+      const reason = err instanceof Error ? err.message : 'خطأ في الاتصال بقاعدة البيانات';
+      throw new Error(
+        `فشل الحذف الجزئي بعد تنفيذ ${committedOps} من أصل ${ops.length} عملية (تبقّى ${remaining}). يمكنك إعادة المحاولة لاستكمال حذف السجلات المتبقية. التفاصيل: ${reason}`,
+      );
+    }
+  }
+  return { committedOps, totalOps: ops.length };
+}
+
 function sanitizeSystemSettingsForRule(settings: Partial<SystemSettings> & { seedVersion?: string }) {
   const cleanUrl = sanitizeExtractedText(settings.centralApiUrl || '').trim();
   return stripUndefined({
@@ -1157,9 +1183,6 @@ export async function saveDisbursementsBatchFs(
     if (calc.hasNegativeInput) {
       throw new Error('لا يُسمح بإدخال كميات سالبة في كشف الصرف.');
     }
-    if (calc.hasVariance && !sanitizeExtractedText(row.varianceReason || '')) {
-      throw new Error('يجب كتابة سبب الفرق لأي بند يحتوي على فرق تسوية غير صفري.');
-    }
   }
 
   const reportId = `rep-${params.governorateId}-${params.reportDate}`;
@@ -1660,6 +1683,455 @@ export async function deleteTractorFs(
   });
 
   return { deletedId: tractorId, auditEntry };
+}
+
+export interface AssociationLinkedRecordCounts {
+  disbursements: number;
+  tractors: number;
+  attachments: number;
+  total: number;
+}
+
+export async function countAssociationLinkedRecordsFs(
+  associationId: string,
+  governorateId: string,
+  actor: UserProfile,
+): Promise<AssociationLinkedRecordCounts> {
+  if (actor.role !== 'admin') {
+    throw new Error('صلاحية الحذف النهائي للجمعيات مقصورة على مدير النظام فقط.');
+  }
+  const [disbSnap, tracSnap, attSnap] = await Promise.all([
+    getDocs(
+      query(
+        collection(db, 'daily_disbursements'),
+        where('governorateId', '==', governorateId),
+        where('associationId', '==', associationId),
+      ),
+    ),
+    getDocs(
+      query(
+        collection(db, 'tractor_deliveries'),
+        where('governorateId', '==', governorateId),
+        where('associationId', '==', associationId),
+      ),
+    ),
+    getDocs(
+      query(
+        collection(db, 'images_attachments'),
+        where('governorateId', '==', governorateId),
+        where('associationId', '==', associationId),
+      ),
+    ),
+  ]);
+  const disbursements = disbSnap.size;
+  const tractors = tracSnap.size;
+  const attachments = attSnap.size;
+  return {
+    disbursements,
+    tractors,
+    attachments,
+    total: disbursements + tractors + attachments,
+  };
+}
+
+export async function deleteAssociationPermanentlyFs(
+  association: AgriculturalAssociation,
+  actor: UserProfile,
+): Promise<{
+  deletedCounts: AssociationLinkedRecordCounts;
+  auditEntry: AuditLogEntry;
+}> {
+  if (actor.role !== 'admin') {
+    throw new Error('صلاحية الحذف النهائي للجمعيات مقصورة على مدير النظام فقط.');
+  }
+
+  const [disbSnap, tracSnap, attSnap] = await Promise.all([
+    getDocs(
+      query(
+        collection(db, 'daily_disbursements'),
+        where('governorateId', '==', association.governorateId),
+        where('associationId', '==', association.id),
+      ),
+    ),
+    getDocs(
+      query(
+        collection(db, 'tractor_deliveries'),
+        where('governorateId', '==', association.governorateId),
+        where('associationId', '==', association.id),
+      ),
+    ),
+    getDocs(
+      query(
+        collection(db, 'images_attachments'),
+        where('governorateId', '==', association.governorateId),
+        where('associationId', '==', association.id),
+      ),
+    ),
+  ]);
+
+  // Delete linked records first, then name lock(s), then association doc LAST so partial failure allows clean retry
+  const ops: Array<(batch: ReturnType<typeof writeBatch>) => void> = [];
+  for (const d of disbSnap.docs) {
+    ops.push((b) => b.delete(d.ref));
+  }
+  for (const d of tracSnap.docs) {
+    ops.push((b) => b.delete(d.ref));
+  }
+  for (const d of attSnap.docs) {
+    ops.push((b) => b.delete(d.ref));
+  }
+
+  const candidateLockIds = Array.from(
+    new Set(
+      [
+        association.normalizedName,
+        normalizeArabicName(association.nameAr),
+      ]
+        .filter(Boolean)
+        .map((norm) => computeAssociationLockId(association.governorateId, norm)),
+    ),
+  );
+  for (const lockId of candidateLockIds) {
+    const lockRef = doc(db, 'association_name_locks', lockId);
+    const lockSnap = await getDoc(lockRef);
+    if (lockSnap.exists() && String(lockSnap.data()?.associationId || '') === association.id) {
+      ops.push((b) => b.delete(lockRef));
+    }
+  }
+
+  const assocRef = doc(db, 'agricultural_associations', association.id);
+  ops.push((b) => b.delete(assocRef));
+
+  await commitBatchedWritesWithProgress(ops, 380);
+
+  const deletedCounts: AssociationLinkedRecordCounts = {
+    disbursements: disbSnap.size,
+    tractors: tracSnap.size,
+    attachments: attSnap.size,
+    total: disbSnap.size + tracSnap.size + attSnap.size,
+  };
+
+  const auditEntry = await writeAuditLogFs({
+    actor,
+    action: 'DELETE_ASSOCIATION_PERMANENT',
+    entityType: 'agricultural_associations',
+    entityId: association.id,
+    details: `حذف نهائي للجمعية «${association.nameAr}» (${association.code}) مع ${deletedCounts.total} سجل مرتبط`,
+    oldValue: {
+      id: association.id,
+      code: association.code,
+      nameAr: association.nameAr,
+      governorateId: association.governorateId,
+      centerId: association.centerId,
+      isActive: association.isActive,
+    },
+    newValue: {
+      deleted: true,
+      deletedCounts,
+    },
+  });
+
+  return { deletedCounts, auditEntry };
+}
+
+export async function updateTractorAdminFs(
+  tractorId: string,
+  patch: Partial<
+    Pick<
+      TractorDelivery,
+      | 'tractorPlate'
+      | 'manifestNumber'
+      | 'arrivalDate'
+      | 'arrivalTime'
+      | 'fertilizerCode'
+      | 'driverName'
+      | 'driverPhone'
+      | 'driverNationalId'
+      | 'supplySource'
+      | 'manifestBags'
+      | 'actualBags'
+      | 'approvalState'
+      | 'notes'
+      | 'checklist'
+    >
+  >,
+  actor: UserProfile,
+): Promise<{ tractor: TractorDelivery; auditEntry: AuditLogEntry }> {
+  if (actor.role !== 'admin') {
+    throw new Error('صلاحية تعديل سجلات الجرارات مقصورة على مدير النظام فقط.');
+  }
+  const ref = doc(db, 'tractor_deliveries', tractorId);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) {
+    throw new Error('سجل الجرار غير موجود.');
+  }
+  const existing = snap.data();
+  const nextManifestBags = Math.max(0, Math.round(patch.manifestBags ?? Number(existing.manifestBags || 0)));
+  const nextActualBags = Math.max(0, Math.round(patch.actualBags ?? Number(existing.actualBags || 0)));
+  const nextChecklist = patch.checklist ?? existing.checklist ?? {
+    sealIntact: true,
+    bagsDryAndIntact: true,
+    manifestMatchesPlate: true,
+    weightVerified: true,
+  };
+  const metrics = computeTractorMetrics(
+    nextManifestBags,
+    nextActualBags,
+    !nextChecklist.bagsDryAndIntact,
+  );
+  const nextPlate = sanitizeExtractedText(patch.tractorPlate ?? String(existing.tractorPlate || ''));
+  const nextManifest = sanitizeExtractedText(patch.manifestNumber ?? String(existing.manifestNumber || ''));
+  if (!nextPlate || !nextManifest) {
+    throw new Error('رقم الجرار ورقم البوليصة مطلوبان.');
+  }
+  const nextApprovalState = patch.approvalState ?? (existing.approvalState as TractorDelivery['approvalState']);
+  const nextArrivalDate = patch.arrivalDate ?? String(existing.arrivalDate || '');
+  const nextFert = patch.fertilizerCode ?? String(existing.fertilizerCode || 'urea');
+  const nextNotes = sanitizeExtractedText(patch.notes ?? String(existing.notes || ''));
+
+  const updatePayload = stripUndefined({
+    tractorPlate: nextPlate,
+    manifestNumber: nextManifest,
+    arrivalDate: nextArrivalDate,
+    arrivalTime: sanitizeExtractedText(patch.arrivalTime ?? String(existing.arrivalTime || '')),
+    fertilizerCode: nextFert,
+    driverName: sanitizeExtractedText(patch.driverName ?? String(existing.driverName || '')),
+    driverPhone: sanitizeExtractedText(patch.driverPhone ?? String(existing.driverPhone || '')),
+    driverNationalId: sanitizeExtractedText(patch.driverNationalId ?? String(existing.driverNationalId || '')),
+    supplySource: sanitizeExtractedText(patch.supplySource ?? String(existing.supplySource || '')),
+    manifestBags: nextManifestBags,
+    actualBags: nextActualBags,
+    bagVariance: Math.round(metrics.bagVariance),
+    inspectionStatus: metrics.inspectionStatus,
+    approvalState: nextApprovalState,
+    checklist: nextChecklist,
+    notes: nextNotes,
+  });
+
+  await updateDoc(ref, updatePayload);
+
+  const updated: TractorDelivery = {
+    id: tractorId,
+    governorateId: String(existing.governorateId || ''),
+    centerId: String(existing.centerId || ''),
+    associationId: String(existing.associationId || ''),
+    tractorPlate: nextPlate,
+    arrivalDate: nextArrivalDate,
+    arrivalTime: String(updatePayload.arrivalTime || ''),
+    fertilizerCode: nextFert,
+    driverName: String(updatePayload.driverName || ''),
+    driverPhone: String(updatePayload.driverPhone || ''),
+    driverNationalId: String(updatePayload.driverNationalId || ''),
+    supplySource: String(updatePayload.supplySource || ''),
+    manifestNumber: nextManifest,
+    manifestBags: nextManifestBags,
+    actualBags: nextActualBags,
+    bagVariance: Math.round(metrics.bagVariance),
+    inspectionStatus: metrics.inspectionStatus,
+    approvalState: nextApprovalState,
+    checklist: nextChecklist,
+    notes: nextNotes,
+    createdByUid: String(existing.createdByUid || actor.uid),
+    createdAt: toIsoString(existing.createdAt) || new Date().toISOString(),
+  };
+
+  const auditEntry = await writeAuditLogFs({
+    actor,
+    action: 'ADMIN_UPDATE_TRACTOR',
+    entityType: 'tractor_deliveries',
+    entityId: tractorId,
+    details: `تعديل سجل الجرار ${nextPlate} (بوليصة ${nextManifest}) بواسطة مدير النظام`,
+    oldValue: {
+      tractorPlate: existing.tractorPlate,
+      manifestNumber: existing.manifestNumber,
+      manifestBags: existing.manifestBags,
+      actualBags: existing.actualBags,
+      approvalState: existing.approvalState,
+      notes: existing.notes || '',
+    },
+    newValue: {
+      tractorPlate: nextPlate,
+      manifestNumber: nextManifest,
+      manifestBags: nextManifestBags,
+      actualBags: nextActualBags,
+      approvalState: nextApprovalState,
+      notes: nextNotes,
+    },
+  });
+
+  return { tractor: updated, auditEntry };
+}
+
+export async function updateImageAttachmentAdminFs(
+  attachmentId: string,
+  patch: {
+    extractedClosingBalance?: number | null;
+    notes?: string;
+    reportDate?: string;
+  },
+  actor: UserProfile,
+): Promise<{ auditEntry: AuditLogEntry }> {
+  if (actor.role !== 'admin') {
+    throw new Error('صلاحية تعديل المرفقات المحللة مقصورة على مدير النظام فقط.');
+  }
+  const ref = doc(db, 'images_attachments', attachmentId);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) {
+    throw new Error('المرفق غير موجود.');
+  }
+  const existing = snap.data();
+  const nextClosing =
+    patch.extractedClosingBalance === undefined
+      ? existing.extractedClosingBalance ?? null
+      : patch.extractedClosingBalance;
+  const nextNotes = sanitizeExtractedText(patch.notes ?? String(existing.notes || '')).slice(0, 500);
+  const nextDate = patch.reportDate ?? String(existing.reportDate || '');
+
+  await updateDoc(ref, {
+    extractedClosingBalance: nextClosing,
+    notes: nextNotes,
+    reportDate: nextDate,
+  });
+
+  const auditEntry = await writeAuditLogFs({
+    actor,
+    action: 'ADMIN_UPDATE_ATTACHMENT',
+    entityType: 'images_attachments',
+    entityId: attachmentId,
+    details: `تعديل مرفق تحليل الكشف للجمعية ${String(existing.associationName || attachmentId)}`,
+    oldValue: {
+      extractedClosingBalance: existing.extractedClosingBalance ?? null,
+      notes: existing.notes || '',
+      reportDate: existing.reportDate,
+    },
+    newValue: {
+      extractedClosingBalance: nextClosing,
+      notes: nextNotes,
+      reportDate: nextDate,
+    },
+  });
+
+  return { auditEntry };
+}
+
+export async function deleteImageAttachmentAdminFs(
+  attachmentId: string,
+  actor: UserProfile,
+): Promise<{ auditEntry: AuditLogEntry }> {
+  if (actor.role !== 'admin') {
+    throw new Error('صلاحية حذف المرفقات المحللة مقصورة على مدير النظام فقط.');
+  }
+  const ref = doc(db, 'images_attachments', attachmentId);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) {
+    throw new Error('المرفق غير موجود أو تم حذفه بالفعل.');
+  }
+  const existing = snap.data();
+  await deleteDoc(ref);
+
+  const auditEntry = await writeAuditLogFs({
+    actor,
+    action: 'ADMIN_DELETE_ATTACHMENT',
+    entityType: 'images_attachments',
+    entityId: attachmentId,
+    details: `حذف مرفق تحليل الكشف للجمعية ${String(existing.associationName || attachmentId)}`,
+    oldValue: {
+      associationId: existing.associationId,
+      associationName: existing.associationName,
+      reportDate: existing.reportDate,
+      fertilizerCode: existing.fertilizerCode,
+      extractedClosingBalance: existing.extractedClosingBalance ?? null,
+    },
+    newValue: { deleted: true },
+  });
+
+  return { auditEntry };
+}
+
+export async function updateIntegrationLogAdminFs(
+  logId: string,
+  patch: {
+    status?: 'success' | 'failed';
+    httpStatus?: number;
+    responseMessage?: string;
+  },
+  actor: UserProfile,
+): Promise<{ auditEntry: AuditLogEntry }> {
+  if (actor.role !== 'admin') {
+    throw new Error('صلاحية تعديل سجلات التكامل مقصورة على مدير النظام فقط.');
+  }
+  const ref = doc(db, 'integration_logs', logId);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) {
+    throw new Error('سجل التكامل غير موجود.');
+  }
+  const existing = snap.data();
+  const nextStatus = patch.status ?? (existing.status as 'success' | 'failed');
+  const nextHttpStatus =
+    patch.httpStatus !== undefined ? Math.round(patch.httpStatus) : Number(existing.httpStatus || 0);
+  const nextMessage = sanitizeExtractedText(
+    patch.responseMessage ?? String(existing.responseMessage || ''),
+  ).slice(0, 400);
+
+  await updateDoc(ref, {
+    status: nextStatus,
+    httpStatus: nextHttpStatus,
+    responseMessage: nextMessage,
+  });
+
+  const auditEntry = await writeAuditLogFs({
+    actor,
+    action: 'ADMIN_UPDATE_INTEGRATION_LOG',
+    entityType: 'integration_logs',
+    entityId: logId,
+    details: `تعديل سجل التكامل للتقرير ${String(existing.reportId || logId)}`,
+    oldValue: {
+      status: existing.status,
+      httpStatus: existing.httpStatus,
+      responseMessage: existing.responseMessage || '',
+    },
+    newValue: {
+      status: nextStatus,
+      httpStatus: nextHttpStatus,
+      responseMessage: nextMessage,
+    },
+  });
+
+  return { auditEntry };
+}
+
+export async function deleteIntegrationLogAdminFs(
+  logId: string,
+  actor: UserProfile,
+): Promise<{ auditEntry: AuditLogEntry }> {
+  if (actor.role !== 'admin') {
+    throw new Error('صلاحية حذف سجلات التكامل مقصورة على مدير النظام فقط.');
+  }
+  const ref = doc(db, 'integration_logs', logId);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) {
+    throw new Error('سجل التكامل غير موجود أو تم حذفه بالفعل.');
+  }
+  const existing = snap.data();
+  await deleteDoc(ref);
+
+  const auditEntry = await writeAuditLogFs({
+    actor,
+    action: 'ADMIN_DELETE_INTEGRATION_LOG',
+    entityType: 'integration_logs',
+    entityId: logId,
+    details: `حذف سجل التكامل للتقرير ${String(existing.reportId || logId)}`,
+    oldValue: {
+      reportId: existing.reportId,
+      reportDate: existing.reportDate,
+      status: existing.status,
+      httpStatus: existing.httpStatus,
+      responseMessage: existing.responseMessage || '',
+    },
+    newValue: { deleted: true },
+  });
+
+  return { auditEntry };
 }
 
 export async function transitionReportStatusFs(
@@ -2178,9 +2650,24 @@ export async function processOfflineBatchFs(
   actor: UserProfile,
   currentSettings: SystemSettings,
   currentAssociations: AgriculturalAssociation[],
-): Promise<{ processedIds: string[]; errors: Array<{ id: string; error: string }> }> {
+): Promise<{
+  processedIds: string[];
+  errors: Array<{ id: string; error: string }>;
+  skippedWarnings: string[];
+}> {
   const processedIds: string[] = [];
   const errors: Array<{ id: string; error: string }> = [];
+  const skippedWarnings: string[] = [];
+
+  // Load current existing association IDs from Firestore so ops targeting permanently deleted associations are skipped gracefully
+  const scopedGovs = getUserScopedGovernorateIds(actor);
+  let liveAssocIds: Set<string>;
+  try {
+    const liveDocs = await queryByGovernorates('agricultural_associations', scopedGovs);
+    liveAssocIds = new Set(liveDocs.map((d) => d.id));
+  } catch {
+    liveAssocIds = new Set(currentAssociations.map((a) => a.id));
+  }
 
   for (const op of operations) {
     try {
@@ -2197,19 +2684,35 @@ export async function processOfflineBatchFs(
             varianceReason?: string;
           }>;
         };
-        await saveDisbursementsBatchFs(
-          { ...p, treatEmptyAsZero: currentSettings.treatEmptyAsZero },
-          actor,
-        );
+        const validRows = p.rows.filter((r) => liveAssocIds.has(r.associationId));
+        const droppedCount = p.rows.length - validRows.length;
+        if (droppedCount > 0) {
+          skippedWarnings.push(
+            `تم تخطي ${droppedCount} بند صرف في كشف ${p.reportDate} لارتباطها بجمعية تم حذفها نهائيًا.`,
+          );
+        }
+        if (validRows.length > 0) {
+          await saveDisbursementsBatchFs(
+            { ...p, rows: validRows, treatEmptyAsZero: currentSettings.treatEmptyAsZero },
+            actor,
+          );
+        }
       } else if (op.operationType === 'save_association') {
         const p = op.payload as Omit<AgriculturalAssociation, 'id' | 'normalizedName'> & { id?: string };
-        await saveAssociationFs(p, actor, currentAssociations.length + 1);
+        const saved = await saveAssociationFs(p, actor, currentAssociations.length + 1);
+        liveAssocIds.add(saved.association.id);
       } else if (op.operationType === 'create_tractor') {
         const p = op.payload as Omit<
           TractorDelivery,
           'id' | 'bagVariance' | 'inspectionStatus' | 'approvalState' | 'createdByUid' | 'createdAt'
         >;
-        await createTractorFs(p, actor);
+        if (!liveAssocIds.has(p.associationId)) {
+          skippedWarnings.push(
+            `تم تخطي مزامنة الجرار «${p.tractorPlate}» لأن الجمعية المرتبطة به تم حذفها نهائيًا.`,
+          );
+        } else {
+          await createTractorFs(p, actor);
+        }
       } else if (op.operationType === 'approve_tractor') {
         const p = op.payload as { tractorId: string };
         await approveTractorFs(p.tractorId, actor);
@@ -2229,5 +2732,5 @@ export async function processOfflineBatchFs(
     }
   }
 
-  return { processedIds, errors };
+  return { processedIds, errors, skippedWarnings };
 }

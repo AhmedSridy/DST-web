@@ -18,6 +18,7 @@ import {
   YAxis,
 } from 'recharts';
 import { useAppData } from '../context/AppDataContext.tsx';
+import { getGovernoratesWithActiveAssociations } from '../utils/analytics.ts';
 import { formatNumberAr } from '../utils/calculations.ts';
 import { STATUS_LABELS_AR } from '../utils/rbac.ts';
 
@@ -58,36 +59,46 @@ export const DashboardView: React.FC<{
     };
   }, [associations, disbursements, reports, tractors]);
 
+  const activeChartGovs = useMemo(
+    () => getGovernoratesWithActiveAssociations(governorates, associations),
+    [associations, governorates],
+  );
+
   const chartByGov = useMemo(() => {
-    const primaryGovIds = new Set(['gov-ismailia', 'gov-suez', 'gov-portsaid']);
-    return governorates
-      .map((gov) => {
-        const govReports = reports.filter((r) => r.governorateId === gov.id);
-        const repIds = new Set(govReports.map((r) => r.id));
-        const rows = disbursements.filter((d) => repIds.has(d.reportId));
-        const urea = rows
-          .filter((r) => r.fertilizerCode === 'urea')
-          .reduce((s, r) => s + (r.actualDisbursed ?? 0), 0);
-        const nitrate = rows
-          .filter((r) => r.fertilizerCode === 'nitrate')
-          .reduce((s, r) => s + (r.actualDisbursed ?? 0), 0);
-        const sulfate = rows
-          .filter((r) => r.fertilizerCode === 'sulfate')
-          .reduce((s, r) => s + (r.actualDisbursed ?? 0), 0);
-        return {
-          id: gov.id,
-          name: gov.nameAr,
-          يوريا: urea,
-          نترات: nitrate,
-          سلفات: sulfate,
-        };
-      })
-      .filter((item) => primaryGovIds.has(item.id) || item.يوريا + item.نترات + item.سلفات > 0);
-  }, [disbursements, governorates, reports]);
+    return activeChartGovs.map((gov) => {
+      const govReports = reports.filter((r) => r.governorateId === gov.id);
+      const repIds = new Set(govReports.map((r) => r.id));
+      const rows = disbursements.filter(
+        (d) => repIds.has(d.reportId) || d.governorateId === gov.id,
+      );
+      const urea = rows
+        .filter((r) => r.fertilizerCode === 'urea')
+        .reduce((s, r) => s + (r.actualDisbursed ?? 0), 0);
+      const nitrate = rows
+        .filter((r) => r.fertilizerCode === 'nitrate')
+        .reduce((s, r) => s + (r.actualDisbursed ?? 0), 0);
+      const sulfate = rows
+        .filter((r) => r.fertilizerCode === 'sulfate')
+        .reduce((s, r) => s + (r.actualDisbursed ?? 0), 0);
+      return {
+        id: gov.id,
+        name: gov.nameAr,
+        يوريا: urea,
+        نترات: nitrate,
+        سلفات: sulfate,
+      };
+    });
+  }, [activeChartGovs, disbursements, reports]);
 
   const chartByFertilizer = useMemo(() => {
+    const activeGovSet = new Set(activeChartGovs.map((g) => g.id));
+    const repGovMap = new Map(reports.map((r) => [r.id, r.governorateId]));
     return fertilizerTypes.map((ft) => {
-      const rows = disbursements.filter((d) => d.fertilizerCode === ft.code);
+      const rows = disbursements.filter((d) => {
+        if (d.fertilizerCode !== ft.code) return false;
+        const gId = d.governorateId || repGovMap.get(d.reportId) || '';
+        return activeGovSet.has(gId);
+      });
       return {
         name: ft.nameAr,
         'بداية اليوم': rows.reduce((s, r) => s + (r.openingBalance ?? 0), 0),
@@ -95,29 +106,32 @@ export const DashboardView: React.FC<{
         'نهاية اليوم': rows.reduce((s, r) => s + (r.closingBalance ?? 0), 0),
       };
     });
-  }, [disbursements, fertilizerTypes]);
+  }, [activeChartGovs, disbursements, fertilizerTypes, reports]);
 
   const alerts = useMemo(() => {
+    const assocMap = new Map(associations.map((a) => [a.id, a]));
     const items: Array<{ id: string; title: string; detail: string; targetTab: string }> = [];
     for (const d of disbursements) {
       if (d.variance !== null && Math.abs(d.variance) > 0.001) {
-        const assoc = associations.find((a) => a.id === d.associationId);
+        const assoc = assocMap.get(d.associationId);
+        if (!assoc) continue;
         const fert = fertilizerTypes.find((f) => f.code === d.fertilizerCode);
         items.push({
           id: `var-${d.id}`,
-          title: `⚠ اختلاف تسوية في ${assoc?.nameAr || d.associationId}`,
-          detail: `صنف ${fert?.nameAr || d.fertilizerCode}: فرق ${formatNumberAr(d.variance)} شيكارة (${d.varianceReason || 'بانتظار التوضيح'})`,
+          title: `⚠ اختلاف تسوية في ${assoc.nameAr}`,
+          detail: `صنف ${fert?.nameAr || d.fertilizerCode}: فرق ${formatNumberAr(d.variance)} شيكارة (${d.varianceReason?.trim() || 'بدون توضيح'})`,
           targetTab: 'sheet',
         });
       }
     }
     for (const t of tractors) {
       if (t.approvalState === 'pending') {
-        const assoc = associations.find((a) => a.id === t.associationId);
+        const assoc = assocMap.get(t.associationId);
+        if (!assoc) continue;
         items.push({
           id: `tr-${t.id}`,
           title: `جرار بانتظار الاعتماد النهائي (${t.tractorPlate})`,
-          detail: `${assoc?.nameAr || ''} · بوليصة ${t.manifestNumber} · فعلي ${formatNumberAr(t.actualBags)} شيكارة`,
+          detail: `${assoc.nameAr} · بوليصة ${t.manifestNumber} · فعلي ${formatNumberAr(t.actualBags)} شيكارة`,
           targetTab: 'tractors',
         });
       }
@@ -209,7 +223,7 @@ export const DashboardView: React.FC<{
             {formatNumberAr(metrics.varianceCount)}
           </p>
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            {metrics.varianceCount > 0 ? '⚠ تتطلب توضيح سبب الاختلاف والمراجعة' : '✔ كافة البنود المسجلة مطابقة'}
+            {metrics.varianceCount > 0 ? '⚠ بنود بها فرق تسوية للمراجعة' : '✔ كافة البنود المسجلة مطابقة'}
           </p>
         </div>
       </div>
@@ -220,40 +234,52 @@ export const DashboardView: React.FC<{
           <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
             توزيع المنصرف حسب المحافظة والصنف (شيكارة)
           </h3>
-          <div className="mt-4 h-72 w-full" dir="ltr">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartByGov} margin={{ top: 10, right: 12, left: 0, bottom: 8 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                <XAxis dataKey="name" tick={{ fontSize: 12, fill: '#64748b' }} />
-                <YAxis tick={{ fontSize: 12, fill: '#64748b' }} />
-                <Tooltip />
-                <Legend />
-                <Bar dataKey="يوريا" fill="#047857" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="نترات" fill="#0f766e" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="سلفات" fill="#64748b" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
+          {chartByGov.length === 0 ? (
+            <div className="mt-4 h-72 flex items-center justify-center rounded-lg border border-dashed border-slate-200 dark:border-slate-700 text-sm text-slate-500 dark:text-slate-400">
+              لا توجد جمعيات مفعّلة لعرض المخططات
+            </div>
+          ) : (
+            <div className="mt-4 h-72 w-full" dir="ltr">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={chartByGov} margin={{ top: 10, right: 12, left: 0, bottom: 8 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <XAxis dataKey="name" tick={{ fontSize: 12, fill: '#64748b' }} />
+                  <YAxis tick={{ fontSize: 12, fill: '#64748b' }} />
+                  <Tooltip />
+                  <Legend />
+                  <Bar dataKey="يوريا" fill="#047857" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="نترات" fill="#0f766e" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="سلفات" fill="#64748b" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
         </div>
 
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
           <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
             مقارنة بداية اليوم والمنصرف ونهاية اليوم لكل صنف
           </h3>
-          <div className="mt-4 h-72 w-full" dir="ltr">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartByFertilizer} margin={{ top: 10, right: 12, left: 0, bottom: 8 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                <XAxis dataKey="name" tick={{ fontSize: 12, fill: '#64748b' }} />
-                <YAxis tick={{ fontSize: 12, fill: '#64748b' }} />
-                <Tooltip />
-                <Legend />
-                <Bar dataKey="بداية اليوم" fill="#10b981" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="المنصرف" fill="#065f46" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="نهاية اليوم" fill="#94a3b8" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
+          {chartByGov.length === 0 ? (
+            <div className="mt-4 h-72 flex items-center justify-center rounded-lg border border-dashed border-slate-200 dark:border-slate-700 text-sm text-slate-500 dark:text-slate-400">
+              لا توجد جمعيات مفعّلة لعرض المخططات
+            </div>
+          ) : (
+            <div className="mt-4 h-72 w-full" dir="ltr">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={chartByFertilizer} margin={{ top: 10, right: 12, left: 0, bottom: 8 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <XAxis dataKey="name" tick={{ fontSize: 12, fill: '#64748b' }} />
+                  <YAxis tick={{ fontSize: 12, fill: '#64748b' }} />
+                  <Tooltip />
+                  <Legend />
+                  <Bar dataKey="بداية اليوم" fill="#10b981" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="المنصرف" fill="#065f46" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="نهاية اليوم" fill="#94a3b8" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
         </div>
       </div>
 

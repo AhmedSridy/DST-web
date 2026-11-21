@@ -6,14 +6,17 @@ import {
   Edit3,
   GripVertical,
   ListPlus,
+  Loader2,
   Plus,
   RotateCcw,
   Search,
   Slash,
+  Trash2,
   X,
 } from 'lucide-react';
 import { useAppData } from '../context/AppDataContext.tsx';
 import { useAuth } from '../context/AuthContext.tsx';
+import type { AssociationLinkedRecordCounts } from '../lib/firestoreRepo.ts';
 import type { AgriculturalAssociation } from '../types/domain.ts';
 import {
   MAX_ASSOCIATION_NAME_LENGTH,
@@ -25,6 +28,7 @@ import {
 import { formatNumberAr } from '../utils/calculations.ts';
 import { getVisibleGovernorates, hasGranularAccess } from '../utils/rbac.ts';
 import { ConfirmDialog } from './ConfirmDialog.tsx';
+import { useOnlineStatus } from './PwaControls.tsx';
 
 interface AssociationsManagerViewProps {
   initialGovId?: string;
@@ -33,7 +37,8 @@ interface AssociationsManagerViewProps {
 export const AssociationsManagerView: React.FC<AssociationsManagerViewProps> = ({
   initialGovId,
 }) => {
-  const { profile } = useAuth();
+  const { profile, authMode } = useAuth();
+  const isOnline = useOnlineStatus();
   const {
     governorates,
     centers,
@@ -43,6 +48,8 @@ export const AssociationsManagerView: React.FC<AssociationsManagerViewProps> = (
     addBulkAssociations,
     deactivateAssociation,
     reactivateAssociation,
+    countAssociationLinkedRecords,
+    deleteAssociationPermanently,
     reorderAssociations,
     pushToast,
   } = useAppData();
@@ -89,13 +96,73 @@ export const AssociationsManagerView: React.FC<AssociationsManagerViewProps> = (
   const [bulkCenterId, setBulkCenterId] = useState('');
   const [savingBulk, setSavingBulk] = useState(false);
 
-  // Edit modal & Soft delete confirmation
+  // Edit modal, Soft delete, & Admin Permanent delete confirmation
   const [editing, setEditing] = useState<Partial<AgriculturalAssociation> | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AgriculturalAssociation | null>(null);
+  const [permDeleteTarget, setPermDeleteTarget] = useState<AgriculturalAssociation | null>(null);
+  const [permDeleteCounts, setPermDeleteCounts] = useState<AssociationLinkedRecordCounts | null>(
+    null,
+  );
+  const [countingAssocId, setCountingAssocId] = useState<string | null>(null);
+  const [isPermDeleting, setIsPermDeleting] = useState(false);
+  const [permDeleteError, setPermDeleteError] = useState<string | null>(null);
   const [draggedAssocId, setDraggedAssocId] = useState<string | null>(null);
 
   const canManage = hasGranularAccess(profile, 'canManageAssociations');
+  const isAdmin = profile?.role === 'admin';
+  const permDeleteOfflineBlocked = authMode === 'firebase' && !isOnline;
   const activeGov = governorates.find((g) => g.id === activeGovId);
+
+  const handleOpenPermanentDelete = async (assoc: AgriculturalAssociation) => {
+    if (!isAdmin) return;
+    if (permDeleteOfflineBlocked) {
+      pushToast({
+        type: 'warning',
+        title: 'يتطلب اتصالًا بالإنترنت',
+        description: 'الحذف النهائي للجمعيات يعمل أونلاين فقط ولا يُضاف إلى طابور المزامنة.',
+      });
+      return;
+    }
+    setCountingAssocId(assoc.id);
+    setPermDeleteError(null);
+    try {
+      const counts = await countAssociationLinkedRecords(assoc.id, assoc.governorateId);
+      setPermDeleteCounts(counts);
+      setPermDeleteTarget(assoc);
+    } catch (error: unknown) {
+      pushToast({
+        type: 'error',
+        title: 'تعذر فحص السجلات المرتبطة',
+        description: error instanceof Error ? error.message : 'تحقق من الاتصال ثم أعد المحاولة.',
+      });
+    } finally {
+      setCountingAssocId(null);
+    }
+  };
+
+  const handleConfirmPermanentDelete = async () => {
+    if (!permDeleteTarget || isPermDeleting) return;
+    setIsPermDeleting(true);
+    setPermDeleteError(null);
+    try {
+      await deleteAssociationPermanently(permDeleteTarget.id);
+      setPermDeleteTarget(null);
+      setPermDeleteCounts(null);
+    } catch (error: unknown) {
+      const msg =
+        error instanceof Error
+          ? error.message
+          : 'تعذر إتمام الحذف النهائي. يمكنك إعادة المحاولة لاستكمال حذف السجلات المتبقية.';
+      setPermDeleteError(msg);
+      pushToast({
+        type: 'error',
+        title: 'تعذر إتمام الحذف النهائي',
+        description: msg,
+      });
+    } finally {
+      setIsPermDeleting(false);
+    }
+  };
 
   const govCenters = useMemo(
     () => centers.filter((c) => c.governorateId === activeGovId && c.isActive),
@@ -664,7 +731,7 @@ export const AssociationsManagerView: React.FC<AssociationsManagerViewProps> = (
                                 aria-label={`إيقاف ${assoc.nameAr}`}
                                 title="إيقاف (حذف ناعم)"
                                 onClick={() => setDeleteTarget(assoc)}
-                                className="rounded border border-rose-200 dark:border-rose-800 p-1.5 text-rose-700 dark:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-950/40"
+                                className="rounded border border-amber-300 dark:border-amber-800 p-1.5 text-amber-800 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-950/40"
                               >
                                 <Slash className="w-3.5 h-3.5" />
                               </button>
@@ -677,6 +744,26 @@ export const AssociationsManagerView: React.FC<AssociationsManagerViewProps> = (
                               >
                                 <RotateCcw className="w-3 h-3" />
                                 إعادة تفعيل
+                              </button>
+                            )}
+                            {isAdmin && (
+                              <button
+                                type="button"
+                                disabled={permDeleteOfflineBlocked || countingAssocId === assoc.id}
+                                aria-label={`حذف نهائي ${assoc.nameAr}`}
+                                title={
+                                  permDeleteOfflineBlocked
+                                    ? 'الحذف النهائي يتطلب اتصالًا بالإنترنت'
+                                    : 'حذف نهائي (يمحو الجمعية وسجلاتها)'
+                                }
+                                onClick={() => void handleOpenPermanentDelete(assoc)}
+                                className="rounded border border-rose-300 dark:border-rose-800 p-1.5 text-rose-700 dark:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-950/40 disabled:opacity-40"
+                              >
+                                {countingAssocId === assoc.id ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                )}
                               </button>
                             )}
                           </div>
@@ -1018,6 +1105,49 @@ export const AssociationsManagerView: React.FC<AssociationsManagerViewProps> = (
             setDeleteTarget(null);
           }
         }}
+      />
+
+      <ConfirmDialog
+        open={Boolean(permDeleteTarget && permDeleteCounts)}
+        title="تأكيد الحذف النهائي للجمعية"
+        message={
+          permDeleteTarget && permDeleteCounts
+            ? permDeleteCounts.total === 0
+              ? `هل تريد الحذف النهائي لجمعية «${permDeleteTarget.nameAr}» (${permDeleteTarget.code})؟\nلا توجد أي سجلات صرف أو جرارات أو مرفقات مرتبطة بهذه الجمعية. لا يمكن التراجع عن هذا الإجراء.`
+              : `أنت على وشك الحذف النهائي لجمعية «${permDeleteTarget.nameAr}» (${permDeleteTarget.code}).\nالسجلات المرتبطة التي سيتم حذفها نهائيًا:\n• بنود الصرف اليومي (daily_disbursements): ${formatNumberAr(permDeleteCounts.disbursements)}\n• شحنات الجرارات (tractor_deliveries): ${formatNumberAr(permDeleteCounts.tractors)}\n• مرفقات تحليل الصور (images_attachments): ${formatNumberAr(permDeleteCounts.attachments)}`
+            : ''
+        }
+        warningNote={
+          permDeleteCounts && permDeleteCounts.total > 0
+            ? 'تحذير: الحذف النهائي يمحو تاريخ أرصدة الجمعية وسجلاتها بالكامل ولا يمكن التراجع عنه. يُنصح بشدة بتصدير نسخة احتياطية JSON أولًا من صفحة «الإدارة والتدقيق» قبل المتابعة.'
+            : undefined
+        }
+        errorMessage={permDeleteError}
+        confirmTextExpected={
+          permDeleteCounts && permDeleteCounts.total > 0 ? permDeleteTarget?.nameAr : undefined
+        }
+        confirmTextLabel={
+          permDeleteTarget
+            ? `للتأكيد النهائي اكتب اسم الجمعية بالضبط: «${permDeleteTarget.nameAr}»`
+            : undefined
+        }
+        confirmTextPlaceholder={permDeleteTarget?.nameAr}
+        confirmLabel={
+          isPermDeleting
+            ? 'جارٍ الحذف النهائي...'
+            : permDeleteError
+              ? 'إعادة المحاولة'
+              : 'حذف نهائي'
+        }
+        isSubmitting={isPermDeleting}
+        onCancel={() => {
+          if (!isPermDeleting) {
+            setPermDeleteTarget(null);
+            setPermDeleteCounts(null);
+            setPermDeleteError(null);
+          }
+        }}
+        onConfirm={() => void handleConfirmPermanentDelete()}
       />
     </div>
   );

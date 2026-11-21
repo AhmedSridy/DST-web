@@ -21,6 +21,7 @@ import {
   computeLowBalanceAlerts,
   computeMultiDaySeries,
   computeOverdueReport,
+  getGovernoratesWithActiveAssociations,
   type AnalyticsMetricKey,
   type MultiDayPoint,
 } from '../utils/analytics.ts';
@@ -90,6 +91,11 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
   const visibleGovernorates = useMemo(
     () => getVisibleGovernorates(profile, governorates),
     [governorates, profile],
+  );
+
+  const activeChartGovs = useMemo(
+    () => getGovernoratesWithActiveAssociations(visibleGovernorates, associations),
+    [associations, visibleGovernorates],
   );
 
   const [activeTab, setActiveTab] = useState<AnalyticsTabId>(initialTab);
@@ -162,7 +168,11 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
   }, [associations, disbursements, effectiveGovId, overdueDate, reports, visibleGovernorates]);
 
   // Tab 2: Comparison state
-  const [compGovId, setCompGovId] = useState<string>(effectiveGovId);
+  const [compGovId, setCompGovId] = useState<string>(
+    activeChartGovs.some((g) => g.id === effectiveGovId)
+      ? effectiveGovId
+      : activeChartGovs[0]?.id || '',
+  );
   const [compMetric, setCompMetric] = useState<AnalyticsMetricKey>('disbursed');
   const [compDays, setCompDays] = useState<7 | 14 | 30>(7);
   const [compEndDate, setCompEndDate] = useState<string>(getTodayDateIso());
@@ -173,7 +183,21 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
   }>({ reports: [], disbursements: [] });
 
   useEffect(() => {
-    if (!open || activeTab !== 'comparison') return;
+    if (activeChartGovs.length === 0) {
+      if (compGovId !== '') setCompGovId('');
+      return;
+    }
+    if (!activeChartGovs.some((g) => g.id === compGovId)) {
+      setCompGovId(
+        activeChartGovs.some((g) => g.id === effectiveGovId)
+          ? effectiveGovId
+          : activeChartGovs[0].id,
+      );
+    }
+  }, [activeChartGovs, compGovId, effectiveGovId]);
+
+  useEffect(() => {
+    if (!open || activeTab !== 'comparison' || !compGovId) return;
     let cancelled = false;
     setCompLoading(true);
     void fetchAnalyticsHistory({
@@ -487,14 +511,19 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
                   <span className="font-semibold text-slate-600 dark:text-slate-300">المحافظة</span>
                   <select
                     value={compGovId}
+                    disabled={activeChartGovs.length === 0}
                     onChange={(e) => setCompGovId(e.target.value)}
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 dark:text-slate-100"
+                    className="w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 dark:text-slate-100 disabled:opacity-50"
                   >
-                    {visibleGovernorates.map((g) => (
-                      <option key={g.id} value={g.id}>
-                        {g.nameAr}
-                      </option>
-                    ))}
+                    {activeChartGovs.length === 0 ? (
+                      <option value="">لا توجد جمعيات مفعّلة</option>
+                    ) : (
+                      activeChartGovs.map((g) => (
+                        <option key={g.id} value={g.id}>
+                          {g.nameAr}
+                        </option>
+                      ))
+                    )}
                   </select>
                 </label>
 
@@ -569,6 +598,11 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
                   </span>
                 </div>
 
+                {activeChartGovs.length === 0 ? (
+                  <div className="py-16 text-center text-sm text-slate-500 dark:text-slate-400 rounded-lg border border-dashed border-slate-200 dark:border-slate-700">
+                    لا توجد جمعيات مفعّلة لعرض المخططات
+                  </div>
+                ) : (
                 <div className="overflow-x-auto">
                   <svg
                     role="img"
@@ -678,6 +712,7 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
                     ))}
                   </svg>
                 </div>
+                )}
               </div>
 
               {/* Matching Data Table */}

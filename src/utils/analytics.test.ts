@@ -8,9 +8,11 @@ import type {
 } from '../types/domain.ts';
 import {
   computeBalancesReport,
+  computeDashboardGovChartData,
   computeLowBalanceAlerts,
   computeMultiDaySeries,
   computeOverdueReport,
+  getGovernoratesWithActiveAssociations,
 } from './analytics.ts';
 
 const govs: Governorate[] = [
@@ -249,4 +251,137 @@ test('computeOverdueReport excludes associations created after selectedDate and 
     ['a-new', 'a-1', 'a-2'],
   );
 });
+
+test('computeDashboardGovChartData dynamically follows active associations regardless of disbursement value', () => {
+  const allGovs: Governorate[] = [
+    ...govs,
+    { id: 'gov-cairo', code: 'CAI', nameAr: 'القاهرة', region: 'القاهرة الكبرى', isActive: true },
+  ];
+
+  // Cairo has NO active associations -> excluded; Ismailia & Suez have active associations -> included (Suez with 0 disbursement)
+  const initialChart = computeDashboardGovChartData({
+    governorates: allGovs,
+    associations: assocs,
+    reports,
+    disbursements,
+  });
+  assert.deepEqual(
+    initialChart.map((p) => p.governorateId),
+    ['gov-ismailia', 'gov-suez'],
+  );
+  assert.equal(initialChart.find((p) => p.governorateId === 'gov-suez')?.المنصرف, 0);
+
+  // Add an active association to Cairo -> Cairo immediately appears even with 0 disbursements
+  const withCairoAssoc: AgriculturalAssociation[] = [
+    ...assocs,
+    {
+      id: 'a-cairo-1',
+      code: 'CAI-001',
+      nameAr: 'جمعية المطرية',
+      normalizedName: 'جمعيه المطريه',
+      governorateId: 'gov-cairo',
+      centerId: 'c-cairo',
+      managerName: '',
+      managerPhone: '',
+      isActive: true,
+    },
+  ];
+  const chartWithCairo = computeDashboardGovChartData({
+    governorates: allGovs,
+    associations: withCairoAssoc,
+    reports,
+    disbursements,
+  });
+  assert.deepEqual(
+    chartWithCairo.map((p) => p.governorateId),
+    ['gov-ismailia', 'gov-suez', 'gov-cairo'],
+  );
+
+  // Deactivate all associations in Ismailia -> Ismailia disappears immediately even though it has disbursements
+  // Deactivate one association in Ismailia while keeping the other active -> Ismailia stays and keeps historical total
+  const oneDeactivated = assocs.map((a) => (a.id === 'a-1' ? { ...a, isActive: false } : a));
+  const chartPartialDeact = computeDashboardGovChartData({
+    governorates: allGovs,
+    associations: oneDeactivated,
+    reports,
+    disbursements,
+  });
+  assert.equal(chartPartialDeact.find((p) => p.governorateId === 'gov-ismailia')?.المنصرف, 200);
+
+  const allIsmDeactivated = assocs.map((a) =>
+    a.governorateId === 'gov-ismailia' ? { ...a, isActive: false } : a,
+  );
+  const chartNoIsm = computeDashboardGovChartData({
+    governorates: allGovs,
+    associations: allIsmDeactivated,
+    reports,
+    disbursements,
+  });
+  assert.deepEqual(
+    chartNoIsm.map((p) => p.governorateId),
+    ['gov-suez'],
+  );
+
+  // When NO governorate has any active associations -> returns empty list cleanly
+  const noneActive = assocs.map((a) => ({ ...a, isActive: false }));
+  assert.deepEqual(getGovernoratesWithActiveAssociations(allGovs, noneActive), []);
+  assert.deepEqual(
+    computeDashboardGovChartData({
+      governorates: allGovs,
+      associations: noneActive,
+      reports,
+      disbursements,
+    }),
+    [],
+  );
+});
+
+test('analytics helpers safely ignore disbursements referencing permanently deleted associations', () => {
+  const orphanDisbursements: DailyDisbursementRow[] = [
+    ...disbursements,
+    {
+      id: 'd-orphan',
+      reportId: 'rep-gov-ismailia-2026-11-12',
+      governorateId: 'gov-ismailia',
+      associationId: 'deleted-assoc-999',
+      fertilizerCode: 'urea',
+      openingBalance: 50,
+      closingBalance: 10,
+      settlementQty: 40,
+      actualDisbursed: 40,
+      variance: 0,
+      varianceReason: '',
+      updatedAt: '2026-11-12T00:00:00Z',
+    },
+  ];
+
+  const balances = computeBalancesReport({
+    governorates: govs,
+    associations: assocs,
+    reports,
+    disbursements: orphanDisbursements,
+    upToDate: '2026-11-12',
+  });
+  assert.equal(balances.byGovernorate.length, 2);
+  assert.equal(
+    balances.byGovernorate
+      .find((g) => g.governorateId === 'gov-ismailia')
+      ?.associations.some((a) => a.associationId === 'deleted-assoc-999'),
+    false,
+  );
+
+  const lowAlerts = computeLowBalanceAlerts({
+    governorates: govs,
+    associations: assocs,
+    reports,
+    disbursements: orphanDisbursements,
+    upToDate: '2026-11-12',
+    minThresholds: { urea: 50, nitrate: null, sulfate: null },
+  });
+  assert.equal(
+    lowAlerts.alerts.some((a) => a.associationId === 'deleted-assoc-999'),
+    false,
+  );
+});
+
 

@@ -33,7 +33,7 @@ export const ReportsCenterView: React.FC = () => {
           reportDate: rep?.reportDate || '',
           governorateId: rep?.governorateId || '',
           govName: gov?.nameAr || '',
-          assocName: assoc?.nameAr || d.associationId,
+          assocName: assoc?.nameAr || 'جمعية محذوفة',
           assocCode: assoc?.code || '',
           fertName: fert?.nameAr || d.fertilizerCode,
         };

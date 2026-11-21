@@ -114,3 +114,16 @@ test('tonsToBags and bagsToTons convert dynamically via 1000 / bagWeightKg and r
   assert.equal(tonsToBags(15, -50), null);
   assert.equal(bagsToTons(300, undefined), null);
 });
+
+test('computeDisbursementRow flags variance cleanly even when varianceReason is omitted or empty', () => {
+  const withEmptyReason = computeDisbursementRow({
+    openingBalance: 250,
+    closingBalance: 100,
+    settlementQty: 140,
+  });
+  assert.equal(withEmptyReason.actualDisbursed, 150);
+  assert.equal(withEmptyReason.variance, 10);
+  assert.equal(withEmptyReason.hasVariance, true);
+  assert.equal(withEmptyReason.hasNegativeInput, false);
+});
+

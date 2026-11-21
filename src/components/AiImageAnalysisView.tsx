@@ -1,12 +1,13 @@
 import React, { useMemo, useRef, useState } from 'react';
-import { Camera, ChevronDown, ChevronUp, Copy, FileSearch, Loader2, Save } from 'lucide-react';
+import { Camera, ChevronDown, ChevronUp, Copy, FileSearch, Loader2, Pencil, Save, Trash2, X } from 'lucide-react';
 import { OcrClientError, useAppData } from '../context/AppDataContext.tsx';
 import { useAuth } from '../context/AuthContext.tsx';
 import { getTodayDateIso } from '../data/seedData.ts';
-import type { SheetSectionType } from '../types/domain.ts';
+import type { ImageAttachmentRecord, SheetSectionType } from '../types/domain.ts';
 import { formatNumberAr } from '../utils/calculations.ts';
 import { resizeImageForUpload } from '../utils/imageResize.ts';
 import { getVisibleGovernorates } from '../utils/rbac.ts';
+import { ConfirmDialog } from './ConfirmDialog.tsx';
 
 export const AiImageAnalysisView: React.FC = () => {
   const { authMode, profile } = useAuth();
@@ -18,8 +19,12 @@ export const AiImageAnalysisView: React.FC = () => {
     attachments,
     analyzeSingleSheet,
     saveAnalyzedAttachment,
+    updateAttachmentAdmin,
+    deleteAttachmentAdmin,
     pushToast,
   } = useAppData();
+
+  const isAdmin = profile?.role === 'admin';
 
   const visibleGovs = useMemo(
     () => getVisibleGovernorates(profile, governorates),
@@ -46,6 +51,65 @@ export const AiImageAnalysisView: React.FC = () => {
     confidence: number;
     notes: string;
   } | null>(null);
+
+  const [editAtt, setEditAtt] = useState<ImageAttachmentRecord | null>(null);
+  const [editAttExtracted, setEditAttExtracted] = useState<string>('');
+  const [editAttDate, setEditAttDate] = useState<string>('');
+  const [editAttNotes, setEditAttNotes] = useState<string>('');
+  const [deleteAtt, setDeleteAtt] = useState<ImageAttachmentRecord | null>(null);
+  const [isMutatingAtt, setIsMutatingAtt] = useState(false);
+
+  const openEditAtt = (att: ImageAttachmentRecord) => {
+    setEditAtt(att);
+    setEditAttExtracted(
+      att.extractedClosingBalance !== null && att.extractedClosingBalance !== undefined
+        ? String(att.extractedClosingBalance)
+        : '',
+    );
+    setEditAttDate(att.reportDate || '');
+    setEditAttNotes(att.notes || '');
+  };
+
+  const handleSaveEditAtt = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editAtt || isMutatingAtt) return;
+    setIsMutatingAtt(true);
+    try {
+      const parsedVal = editAttExtracted.trim() === '' ? null : Number(editAttExtracted);
+      const nextExtracted = parsedVal !== null && Number.isFinite(parsedVal) ? parsedVal : null;
+      await updateAttachmentAdmin(editAtt.id, {
+        extractedClosingBalance: nextExtracted,
+        reportDate: editAttDate.trim() || editAtt.reportDate,
+        notes: editAttNotes.trim(),
+      });
+      setEditAtt(null);
+    } catch (error: unknown) {
+      pushToast({
+        type: 'error',
+        title: 'تعذر تعديل المرفق',
+        description: error instanceof Error ? error.message : 'حدث خطأ أثناء التعديل.',
+      });
+    } finally {
+      setIsMutatingAtt(false);
+    }
+  };
+
+  const handleConfirmDeleteAtt = async () => {
+    if (!deleteAtt || isMutatingAtt) return;
+    setIsMutatingAtt(true);
+    try {
+      await deleteAttachmentAdmin(deleteAtt.id);
+      setDeleteAtt(null);
+    } catch (error: unknown) {
+      pushToast({
+        type: 'error',
+        title: 'تعذر حذف المرفق',
+        description: error instanceof Error ? error.message : 'حدث خطأ أثناء الحذف.',
+      });
+    } finally {
+      setIsMutatingAtt(false);
+    }
+  };
 
   const selectedAssoc = useMemo(
     () => associations.find((a) => a.id === assocId) || govAssocs[0],
@@ -417,13 +481,14 @@ export const AiImageAnalysisView: React.FC = () => {
                   <th className="px-3 py-2 text-center">المسجل</th>
                   <th className="px-3 py-2 text-center">الفرق</th>
                   <th className="px-3 py-2 text-right">ملاحظات التحليل</th>
+                  {isAdmin && <th className="px-3 py-2 text-center">إجراءات</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200 dark:divide-slate-700">
                 {attachments.map((att) => (
                   <tr key={att.id}>
                     <td className="px-3 py-2.5 font-semibold text-slate-900 dark:text-slate-100">
-                      {att.associationName}
+                      {att.associationName || 'جمعية محذوفة'}
                     </td>
                     <td className="px-3 py-2.5 text-center font-mono-num">{att.reportDate}</td>
                     <td className="px-3 py-2.5 text-center font-mono-num">
@@ -436,6 +501,30 @@ export const AiImageAnalysisView: React.FC = () => {
                       {formatNumberAr(att.discrepancy)}
                     </td>
                     <td className="px-3 py-2.5 text-slate-600 dark:text-slate-300">{att.notes}</td>
+                    {isAdmin && (
+                      <td className="px-3 py-2.5 text-center">
+                        <div className="inline-flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => openEditAtt(att)}
+                            aria-label={`تعديل مرفق ${att.associationName}`}
+                            className="inline-flex items-center gap-1 rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-[11px] font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+                          >
+                            <Pencil className="w-3 h-3" />
+                            تعديل
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setDeleteAtt(att)}
+                            aria-label={`حذف مرفق ${att.associationName}`}
+                            className="inline-flex items-center gap-1 rounded border border-rose-200 dark:border-rose-800 px-2 py-1 text-[11px] font-semibold text-rose-700 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            حذف
+                          </button>
+                        </div>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -443,6 +532,100 @@ export const AiImageAnalysisView: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* Admin Edit Attachment Modal */}
+      {editAtt && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
+        >
+          <form
+            onSubmit={(e) => void handleSaveEditAtt(e)}
+            className="w-full max-w-md rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 p-5 shadow-xl space-y-4 text-xs"
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                تعديل سجل الصورة المحللة ({editAtt.associationName})
+              </h3>
+              <button
+                type="button"
+                onClick={() => setEditAtt(null)}
+                aria-label="إغلاق"
+                className="p-1 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="space-y-1">
+                <span className="font-semibold text-slate-700 dark:text-slate-300">الختامي المستخرج</span>
+                <input
+                  type="number"
+                  step="any"
+                  value={editAttExtracted}
+                  onChange={(e) => setEditAttExtracted(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 px-3 py-2 font-mono-num"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="font-semibold text-slate-700 dark:text-slate-300">تاريخ التقرير</span>
+                <input
+                  type="date"
+                  value={editAttDate}
+                  onChange={(e) => setEditAttDate(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 px-3 py-2 font-mono-num"
+                />
+              </label>
+            </div>
+            <label className="block space-y-1">
+              <span className="font-semibold text-slate-700 dark:text-slate-300">ملاحظات التحليل</span>
+              <textarea
+                rows={3}
+                value={editAttNotes}
+                onChange={(e) => setEditAttNotes(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 p-3"
+              />
+            </label>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setEditAtt(null)}
+                className="rounded-lg border border-slate-300 dark:border-slate-600 px-4 py-2 font-semibold text-slate-700 dark:text-slate-200"
+              >
+                إلغاء
+              </button>
+              <button
+                type="submit"
+                disabled={isMutatingAtt}
+                className="rounded-lg bg-emerald-700 px-4 py-2 font-bold text-white hover:bg-emerald-800 disabled:opacity-60"
+              >
+                {isMutatingAtt ? 'جارٍ الحفظ...' : 'حفظ التعديل'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Admin Delete Attachment ConfirmDialog */}
+      <ConfirmDialog
+        open={Boolean(deleteAtt)}
+        title="تأكيد حذف المرفق المحلل"
+        message={
+          deleteAtt
+            ? `سيتم حذف سجل الصورة المحللة لجمعية «${deleteAtt.associationName || 'جمعية محذوفة'}» بتاريخ ${deleteAtt.reportDate} نهائيًا مع توثيق الحذف في سجل التدقيق.`
+            : ''
+        }
+        confirmLabel={isMutatingAtt ? 'جارٍ الحذف...' : 'حذف المرفق'}
+        cancelLabel="إلغاء"
+        variant="danger"
+        isSubmitting={isMutatingAtt}
+        onConfirm={() => void handleConfirmDeleteAtt()}
+        onCancel={() => {
+          if (isMutatingAtt) return;
+          setDeleteAtt(null);
+        }}
+      />
     </div>
   );
 };

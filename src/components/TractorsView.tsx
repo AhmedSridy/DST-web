@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { CheckCircle2, Eye, Plus, Trash2, Truck, Upload, X } from 'lucide-react';
+import { CheckCircle2, Eye, Pencil, Plus, Trash2, Truck, Upload, X } from 'lucide-react';
 import { useAppData } from '../context/AppDataContext.tsx';
 import { useAuth } from '../context/AuthContext.tsx';
 import { getTodayDateIso } from '../data/seedData.ts';
@@ -33,10 +33,12 @@ export const TractorsView: React.FC = () => {
     settings,
     createTractor,
     approveTractor,
+    updateTractorAdmin,
     deleteTractor,
     pushToast,
   } = useAppData();
 
+  const isAdmin = profile?.role === 'admin';
   const visibleGovs = useMemo(
     () => getVisibleGovernorates(profile, governorates),
     [governorates, profile],
@@ -48,6 +50,18 @@ export const TractorsView: React.FC = () => {
   const [deleteTarget, setDeleteTarget] = useState<TractorDelivery | null>(null);
   const [deleteReason, setDeleteReason] = useState('');
   const [isDeleting, setIsDeleting] = useState(false);
+
+  const [editTarget, setEditTarget] = useState<TractorDelivery | null>(null);
+  const [editPlate, setEditPlate] = useState('');
+  const [editManifest, setEditManifest] = useState('');
+  const [editDate, setEditDate] = useState('');
+  const [editFert, setEditFert] = useState('urea');
+  const [editManifestBags, setEditManifestBags] = useState(0);
+  const [editActualBags, setEditActualBags] = useState(0);
+  const [editApprovalState, setEditApprovalState] = useState<'pending' | 'final_approved'>('pending');
+  const [editDriverName, setEditDriverName] = useState('');
+  const [editNotes, setEditNotes] = useState('');
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
 
   const [govId, setGovId] = useState(visibleGovs[0]?.id || 'gov-ismailia');
   const govCenters = useMemo(
@@ -197,6 +211,47 @@ export const TractorsView: React.FC = () => {
   const canCreate =
     hasPermission(profile?.role, 'create_tractor') && hasGranularAccess(profile, 'canEdit');
   const canApprove = hasPermission(profile?.role, 'approve_tractor');
+
+  const openEditTractor = (tr: TractorDelivery) => {
+    setEditTarget(tr);
+    setEditPlate(tr.tractorPlate);
+    setEditManifest(tr.manifestNumber);
+    setEditDate(tr.arrivalDate);
+    setEditFert(tr.fertilizerCode);
+    setEditManifestBags(tr.manifestBags);
+    setEditActualBags(tr.actualBags);
+    setEditApprovalState(tr.approvalState);
+    setEditDriverName(tr.driverName || '');
+    setEditNotes(tr.notes || '');
+  };
+
+  const handleSaveEditTractor = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editTarget || isSavingEdit) return;
+    setIsSavingEdit(true);
+    try {
+      await updateTractorAdmin(editTarget.id, {
+        tractorPlate: editPlate.trim(),
+        manifestNumber: editManifest.trim(),
+        arrivalDate: editDate.trim(),
+        fertilizerCode: editFert,
+        manifestBags: editManifestBags,
+        actualBags: editActualBags,
+        approvalState: editApprovalState,
+        driverName: editDriverName.trim(),
+        notes: editNotes.trim(),
+      });
+      setEditTarget(null);
+    } catch (error: unknown) {
+      pushToast({
+        type: 'error',
+        title: 'تعذر تعديل بيانات الجرار',
+        description: error instanceof Error ? error.message : 'تحقق من الصلاحيات وحالة الاتصال.',
+      });
+    } finally {
+      setIsSavingEdit(false);
+    }
+  };
 
   const handleConfirmDelete = async () => {
     if (!deleteTarget || isDeleting) return;
@@ -578,7 +633,7 @@ export const TractorsView: React.FC = () => {
                       </td>
                       <td className="px-3 py-3">
                         <div className="font-semibold text-slate-900 dark:text-slate-100">
-                          {assoc?.nameAr || tr.associationId}
+                          {assoc?.nameAr || 'جمعية محذوفة'}
                         </div>
                         <div className="text-[11px] text-slate-500 dark:text-slate-400">{gov?.nameAr}</div>
                       </td>
@@ -640,6 +695,17 @@ export const TractorsView: React.FC = () => {
                               اعتماد الشحنة
                             </button>
                           )}
+                          {isAdmin && (
+                            <button
+                              type="button"
+                              onClick={() => openEditTractor(tr)}
+                              aria-label={`تعديل بيانات الجرار ${tr.tractorPlate}`}
+                              className="inline-flex items-center gap-1 rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors whitespace-nowrap"
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                              تعديل
+                            </button>
+                          )}
                           {canDeleteTractorDelivery(profile, tr) && (
                             <button
                               type="button"
@@ -696,13 +762,152 @@ export const TractorsView: React.FC = () => {
         </div>
       )}
 
+      {/* Admin Edit Tractor Modal */}
+      {editTarget && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4"
+        >
+          <form
+            onSubmit={(e) => void handleSaveEditTractor(e)}
+            className="w-full max-w-lg rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 p-5 shadow-xl space-y-4 text-xs"
+          >
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
+              <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                تعديل بيانات الجرار ({editTarget.tractorPlate})
+              </h3>
+              <button
+                type="button"
+                onClick={() => setEditTarget(null)}
+                aria-label="إغلاق"
+                className="p-1 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label className="space-y-1">
+                <span className="font-semibold text-slate-700 dark:text-slate-300">رقم الجرار *</span>
+                <input
+                  type="text"
+                  required
+                  value={editPlate}
+                  onChange={(e) => setEditPlate(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 px-3 py-2"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="font-semibold text-slate-700 dark:text-slate-300">رقم البوليصة *</span>
+                <input
+                  type="text"
+                  required
+                  value={editManifest}
+                  onChange={(e) => setEditManifest(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 px-3 py-2 font-mono-num"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="font-semibold text-slate-700 dark:text-slate-300">تاريخ الوصول *</span>
+                <input
+                  type="date"
+                  required
+                  value={editDate}
+                  onChange={(e) => setEditDate(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 px-3 py-2 font-mono-num"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="font-semibold text-slate-700 dark:text-slate-300">نوع السماد *</span>
+                <select
+                  value={editFert}
+                  onChange={(e) => setEditFert(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 px-3 py-2"
+                >
+                  {fertilizerTypes.map((f) => (
+                    <option key={f.code} value={f.code}>
+                      {f.nameAr}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="space-y-1">
+                <span className="font-semibold text-slate-700 dark:text-slate-300">عدد البوليصة</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={editManifestBags}
+                  onChange={(e) => setEditManifestBags(Math.max(0, Number(e.target.value) || 0))}
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 px-3 py-2 font-mono-num"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="font-semibold text-slate-700 dark:text-slate-300">العدد الفعلي</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={editActualBags}
+                  onChange={(e) => setEditActualBags(Math.max(0, Number(e.target.value) || 0))}
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 px-3 py-2 font-mono-num"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="font-semibold text-slate-700 dark:text-slate-300">حالة الاعتماد</span>
+                <select
+                  value={editApprovalState}
+                  onChange={(e) => setEditApprovalState(e.target.value as 'pending' | 'final_approved')}
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 px-3 py-2"
+                >
+                  <option value="pending">قيد الانتظار (إرجاع للمراجعة)</option>
+                  <option value="final_approved">معتمد نهائيًا</option>
+                </select>
+              </label>
+              <label className="space-y-1">
+                <span className="font-semibold text-slate-700 dark:text-slate-300">اسم السائق</span>
+                <input
+                  type="text"
+                  value={editDriverName}
+                  onChange={(e) => setEditDriverName(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 px-3 py-2"
+                />
+              </label>
+              <label className="space-y-1 sm:col-span-2">
+                <span className="font-semibold text-slate-700 dark:text-slate-300">ملاحظات الفحص</span>
+                <input
+                  type="text"
+                  value={editNotes}
+                  onChange={(e) => setEditNotes(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 px-3 py-2"
+                />
+              </label>
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setEditTarget(null)}
+                className="rounded-lg border border-slate-300 dark:border-slate-600 px-4 py-2 font-semibold text-slate-700 dark:text-slate-200"
+              >
+                إلغاء
+              </button>
+              <button
+                type="submit"
+                disabled={isSavingEdit}
+                className="rounded-lg bg-emerald-700 px-4 py-2 font-bold text-white hover:bg-emerald-800 disabled:opacity-60"
+              >
+                {isSavingEdit ? 'جارٍ الحفظ...' : 'حفظ التعديلات'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {/* Permanent Tractor Removal Confirmation Dialog */}
       <ConfirmDialog
         open={Boolean(deleteTarget)}
         title="تأكيد إزالة بيانات الجرار"
         message={
           deleteTarget
-            ? `سيتم حذف سجل الجرار «${deleteTarget.tractorPlate}» (بوليصة رقم ${deleteTarget.manifestNumber}) نهائيًا من قاعدة البيانات.\nالجمعية: ${associations.find((a) => a.id === deleteTarget.associationId)?.nameAr || deleteTarget.associationId} · الصنف: ${fertilizerTypes.find((f) => f.code === deleteTarget.fertilizerCode)?.nameAr || deleteTarget.fertilizerCode} · العدد الفعلي: ${formatNumberAr(deleteTarget.actualBags)} شيكارة.\nسيتم حفظ نسخة من البيانات في سجل التدقيق.`
+            ? `سيتم حذف سجل الجرار «${deleteTarget.tractorPlate}» (بوليصة رقم ${deleteTarget.manifestNumber}) نهائيًا من قاعدة البيانات.\nالجمعية: ${associations.find((a) => a.id === deleteTarget.associationId)?.nameAr || 'جمعية محذوفة'} · الصنف: ${fertilizerTypes.find((f) => f.code === deleteTarget.fertilizerCode)?.nameAr || deleteTarget.fertilizerCode} · العدد الفعلي: ${formatNumberAr(deleteTarget.actualBags)} شيكارة.\nسيتم حفظ نسخة من البيانات في سجل التدقيق.`
             : ''
         }
         warningNote={

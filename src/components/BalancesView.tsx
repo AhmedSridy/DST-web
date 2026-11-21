@@ -1,9 +1,9 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { ChevronDown, ChevronLeft, Download, Search, Warehouse } from 'lucide-react';
 import { useAppData } from '../context/AppDataContext.tsx';
 import { useAuth } from '../context/AuthContext.tsx';
 import { getTodayDateIso } from '../data/seedData.ts';
-import { computeBalancesReport } from '../utils/analytics.ts';
+import { computeBalancesReport, getGovernoratesWithActiveAssociations } from '../utils/analytics.ts';
 import { normalizeArabicName } from '../utils/arabicNormalize.ts';
 import { formatNumberAr } from '../utils/calculations.ts';
 import { exportBalancesToExcel } from '../utils/exportDocuments.ts';
@@ -17,16 +17,37 @@ export const BalancesView: React.FC = () => {
   const [govFilter, setGovFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [hideUnrecorded, setHideUnrecorded] = useState<boolean>(false);
-  const [expandedGovIds, setExpandedGovIds] = useState<Record<string, boolean>>({
-    'gov-ismailia': true,
-    'gov-suez': true,
-    'gov-portsaid': true,
-  });
+  const [expandedGovIds, setExpandedGovIds] = useState<Record<string, boolean>>({});
 
   const visibleGovernorates = useMemo(
     () => getVisibleGovernorates(profile, governorates),
     [governorates, profile],
   );
+
+  const activeGovsWithAssocs = useMemo(
+    () => getGovernoratesWithActiveAssociations(visibleGovernorates, associations),
+    [associations, visibleGovernorates],
+  );
+
+  useEffect(() => {
+    if (govFilter !== 'all' && !activeGovsWithAssocs.some((g) => g.id === govFilter)) {
+      setGovFilter('all');
+    }
+  }, [activeGovsWithAssocs, govFilter]);
+
+  useEffect(() => {
+    setExpandedGovIds((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      for (const g of activeGovsWithAssocs) {
+        if (!(g.id in next)) {
+          next[g.id] = true;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [activeGovsWithAssocs]);
 
   const rawSummaries = useMemo(
     () =>
@@ -146,7 +167,7 @@ export const BalancesView: React.FC = () => {
             className="w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 dark:text-slate-100"
           >
             <option value="all">كل المحافظات المتاحة</option>
-            {visibleGovernorates.map((g) => (
+            {activeGovsWithAssocs.map((g) => (
               <option key={g.id} value={g.id}>
                 {g.nameAr}
               </option>

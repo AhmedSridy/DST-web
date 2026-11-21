@@ -20,8 +20,12 @@ import {
   approveTractorFs,
   cleanupLegacyPasswordHashesFs,
   clearDayRecordsFs,
+  countAssociationLinkedRecordsFs,
   createOrUpdateUserOrInviteFs,
   createTractorFs,
+  deleteAssociationPermanentlyFs,
+  deleteImageAttachmentAdminFs,
+  deleteIntegrationLogAdminFs,
   deleteTractorFs,
   deleteUserOrInviteFs,
   fetchAnalyticsHistoryFs,
@@ -35,7 +39,11 @@ import {
   saveImageAttachmentFs,
   setAssociationActiveFs,
   transitionReportStatusFs,
+  updateImageAttachmentAdminFs,
+  updateIntegrationLogAdminFs,
   updateSystemSettingsFs,
+  updateTractorAdminFs,
+  type AssociationLinkedRecordCounts,
 } from '../lib/firestoreRepo.ts';
 import type {
   AgriculturalAssociation,
@@ -146,6 +154,11 @@ interface AppDataContextValue extends AppDataState {
   }) => Promise<{ createdCount: number; skippedCount: number }>;
   deactivateAssociation: (id: string) => Promise<void>;
   reactivateAssociation: (id: string) => Promise<void>;
+  countAssociationLinkedRecords: (
+    associationId: string,
+    governorateId: string,
+  ) => Promise<AssociationLinkedRecordCounts>;
+  deleteAssociationPermanently: (associationId: string) => Promise<AssociationLinkedRecordCounts>;
   reorderAssociations: (governorateId: string, orderedIds: string[]) => Promise<void>;
   saveDisbursementsBatch: (params: {
     governorateId: string;
@@ -173,6 +186,28 @@ interface AppDataContextValue extends AppDataState {
     >,
   ) => Promise<void>;
   approveTractor: (tractorId: string) => Promise<void>;
+  updateTractorAdmin: (
+    tractorId: string,
+    patch: Partial<
+      Pick<
+        TractorDelivery,
+        | 'tractorPlate'
+        | 'manifestNumber'
+        | 'arrivalDate'
+        | 'arrivalTime'
+        | 'fertilizerCode'
+        | 'driverName'
+        | 'driverPhone'
+        | 'driverNationalId'
+        | 'supplySource'
+        | 'manifestBags'
+        | 'actualBags'
+        | 'approvalState'
+        | 'notes'
+        | 'checklist'
+      >
+    >,
+  ) => Promise<void>;
   deleteTractor: (tractorId: string, reason?: string) => Promise<void>;
   transitionReportStatus: (
     reportId: string,
@@ -180,6 +215,11 @@ interface AppDataContextValue extends AppDataState {
     notes?: string,
   ) => Promise<void>;
   syncReportCentral: (reportId: string) => Promise<void>;
+  updateIntegrationLogAdmin: (
+    logId: string,
+    patch: { status?: 'success' | 'failed'; httpStatus?: number; responseMessage?: string },
+  ) => Promise<void>;
+  deleteIntegrationLogAdmin: (logId: string) => Promise<void>;
   extractSheetNumbers: (params: {
     imageBase64: string;
     mimeType: string;
@@ -205,6 +245,11 @@ interface AppDataContextValue extends AppDataState {
   saveAnalyzedAttachment: (
     input: Omit<ImageAttachmentRecord, 'id' | 'analyzedByUid' | 'createdAt'>,
   ) => Promise<void>;
+  updateAttachmentAdmin: (
+    attachmentId: string,
+    patch: { extractedClosingBalance?: number | null; notes?: string; reportDate?: string },
+  ) => Promise<void>;
+  deleteAttachmentAdmin: (attachmentId: string) => Promise<void>;
   extractManifest: (params: {
     imageBase64: string;
     mimeType: string;
@@ -438,6 +483,13 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const remaining = await getOfflineQueue();
       setOfflineQueue(remaining);
 
+      if (result.skippedWarnings.length > 0) {
+        pushToast({
+          type: 'warning',
+          title: 'تم تخطي بنود مرتبطة بجمعيات محذوفة نهائيًا',
+          description: result.skippedWarnings.slice(0, 2).join(' · '),
+        });
+      }
       if (result.processedIds.length > 0) {
         pushToast({
           type: 'success',
@@ -794,6 +846,108 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
     pushToast({ type: 'success', title: 'تمت إعادة تفعيل الجمعية بنجاح' });
   };
 
+  const countAssociationLinkedRecords = async (
+    associationId: string,
+    governorateId: string,
+  ): Promise<AssociationLinkedRecordCounts> => {
+    if (profile?.role !== 'admin') {
+      throw new Error('صلاحية الحذف النهائي للجمعيات مقصورة على مدير النظام فقط.');
+    }
+    if (authMode === 'firebase' && profile) {
+      if (!isOnline) {
+        throw new Error('الحذف النهائي للجمعيات يتطلب اتصالًا بالإنترنت.');
+      }
+      return countAssociationLinkedRecordsFs(associationId, governorateId, profile);
+    }
+    const disbursements = state.disbursements.filter((d) => d.associationId === associationId).length;
+    const tractors = state.tractors.filter((t) => t.associationId === associationId).length;
+    const attachments = state.attachments.filter((a) => a.associationId === associationId).length;
+    return {
+      disbursements,
+      tractors,
+      attachments,
+      total: disbursements + tractors + attachments,
+    };
+  };
+
+  const deleteAssociationPermanently = async (
+    associationId: string,
+  ): Promise<AssociationLinkedRecordCounts> => {
+    if (profile?.role !== 'admin') {
+      throw new Error('صلاحية الحذف النهائي للجمعيات مقصورة على مدير النظام فقط.');
+    }
+    const target = state.associations.find((a) => a.id === associationId);
+    if (!target) {
+      throw new Error('الجمعية غير موجودة أو تم حذفها بالفعل.');
+    }
+    if (authMode === 'firebase' && profile) {
+      if (!isOnline) {
+        throw new Error('الحذف النهائي للجمعيات يعمل أونلاين فقط ولا يمكن تنفيذه دون اتصال.');
+      }
+      const { deletedCounts, auditEntry } = await deleteAssociationPermanentlyFs(target, profile);
+      await commitState((prev) => ({
+        ...prev,
+        associations: prev.associations.filter((a) => a.id !== associationId),
+        disbursements: prev.disbursements.filter((d) => d.associationId !== associationId),
+        tractors: prev.tractors.filter((t) => t.associationId !== associationId),
+        attachments: prev.attachments.filter((att) => att.associationId !== associationId),
+        auditLogs: [auditEntry, ...prev.auditLogs],
+      }));
+      pushToast({
+        type: 'success',
+        title: `تم الحذف النهائي لجمعية «${target.nameAr}»`,
+        description:
+          deletedCounts.total > 0
+            ? `تم مسح ${deletedCounts.disbursements} بند صرف، ${deletedCounts.tractors} جرار، و${deletedCounts.attachments} مرفق.`
+            : 'لم تكن هناك سجلات مرتبطة بالجمعية.',
+      });
+      return deletedCounts;
+    }
+
+    const deletedCounts: AssociationLinkedRecordCounts = {
+      disbursements: state.disbursements.filter((d) => d.associationId === associationId).length,
+      tractors: state.tractors.filter((t) => t.associationId === associationId).length,
+      attachments: state.attachments.filter((a) => a.associationId === associationId).length,
+      total: 0,
+    };
+    deletedCounts.total =
+      deletedCounts.disbursements + deletedCounts.tractors + deletedCounts.attachments;
+
+    await commitState((prev) => ({
+      ...prev,
+      associations: prev.associations.filter((a) => a.id !== associationId),
+      disbursements: prev.disbursements.filter((d) => d.associationId !== associationId),
+      tractors: prev.tractors.filter((t) => t.associationId !== associationId),
+      attachments: prev.attachments.filter((att) => att.associationId !== associationId),
+    }));
+    addAuditEntryLocal(
+      'DELETE_ASSOCIATION_PERMANENT',
+      'agricultural_associations',
+      associationId,
+      `حذف نهائي للجمعية «${target.nameAr}» (${target.code}) مع ${deletedCounts.total} سجل مرتبط`,
+      {
+        oldValue: {
+          id: target.id,
+          code: target.code,
+          nameAr: target.nameAr,
+          governorateId: target.governorateId,
+          centerId: target.centerId,
+          isActive: target.isActive,
+        },
+        newValue: { deleted: true, deletedCounts },
+      },
+    );
+    pushToast({
+      type: 'success',
+      title: `تم الحذف النهائي لجمعية «${target.nameAr}»`,
+      description:
+        deletedCounts.total > 0
+          ? `تم مسح ${deletedCounts.disbursements} بند صرف، ${deletedCounts.tractors} جرار، و${deletedCounts.attachments} مرفق.`
+          : 'لم تكن هناك سجلات مرتبطة بالجمعية.',
+    });
+    return deletedCounts;
+  };
+
   const reorderAssociations = async (governorateId: string, orderedIds: string[]) => {
     if (!hasGranularAccess(profile, 'canManageAssociations')) {
       throw new Error('ليس لديك صلاحية إعادة ترتيب الجمعيات.');
@@ -859,9 +1013,6 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const calc = computeDisbursementRow(row, state.settings.treatEmptyAsZero);
       if (calc.hasNegativeInput) {
         throw new Error('لا يُسمح بإدخال كميات سالبة في كشف الصرف.');
-      }
-      if (calc.hasVariance && !sanitizeExtractedText(row.varianceReason || '')) {
-        throw new Error('يجب كتابة سبب الفرق لأي بند يحتوي على فرق تسوية غير صفري.');
       }
     }
 
@@ -1154,6 +1305,103 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
     pushToast({ type: 'success', title: 'تم اعتماد استلام الجرار بنجاح' });
   };
 
+  const updateTractorAdmin = async (
+    tractorId: string,
+    patch: Partial<
+      Pick<
+        TractorDelivery,
+        | 'tractorPlate'
+        | 'manifestNumber'
+        | 'arrivalDate'
+        | 'arrivalTime'
+        | 'fertilizerCode'
+        | 'driverName'
+        | 'driverPhone'
+        | 'driverNationalId'
+        | 'supplySource'
+        | 'manifestBags'
+        | 'actualBags'
+        | 'approvalState'
+        | 'notes'
+        | 'checklist'
+      >
+    >,
+  ) => {
+    if (profile?.role !== 'admin') {
+      throw new Error('صلاحية تعديل سجلات الجرارات مقصورة على مدير النظام فقط.');
+    }
+    const target = state.tractors.find((t) => t.id === tractorId);
+    if (!target) {
+      throw new Error('سجل الجرار غير موجود.');
+    }
+    if (authMode === 'firebase' && profile) {
+      if (!isOnline) {
+        throw new Error('تعديل سجلات الجرارات بواسطة المدير يتطلب اتصالًا بالإنترنت.');
+      }
+      const { tractor, auditEntry } = await updateTractorAdminFs(tractorId, patch, profile);
+      await commitState((prev) => ({
+        ...prev,
+        tractors: prev.tractors.map((t) => (t.id === tractorId ? tractor : t)),
+        auditLogs: [auditEntry, ...prev.auditLogs],
+      }));
+      pushToast({ type: 'success', title: 'تم حفظ تعديلات سجل الجرار' });
+      return;
+    }
+
+    const nextManifestBags = Math.max(0, Math.round(patch.manifestBags ?? target.manifestBags));
+    const nextActualBags = Math.max(0, Math.round(patch.actualBags ?? target.actualBags));
+    const nextChecklist = patch.checklist ?? target.checklist;
+    const metrics = computeTractorMetrics(
+      nextManifestBags,
+      nextActualBags,
+      !nextChecklist.bagsDryAndIntact,
+    );
+    const updated: TractorDelivery = {
+      ...target,
+      ...patch,
+      tractorPlate: sanitizeExtractedText(patch.tractorPlate ?? target.tractorPlate),
+      manifestNumber: sanitizeExtractedText(patch.manifestNumber ?? target.manifestNumber),
+      driverName: sanitizeExtractedText(patch.driverName ?? target.driverName),
+      driverPhone: sanitizeExtractedText(patch.driverPhone ?? target.driverPhone),
+      driverNationalId: sanitizeExtractedText(patch.driverNationalId ?? target.driverNationalId),
+      supplySource: sanitizeExtractedText(patch.supplySource ?? target.supplySource),
+      notes: sanitizeExtractedText(patch.notes ?? target.notes),
+      manifestBags: nextManifestBags,
+      actualBags: nextActualBags,
+      bagVariance: Math.round(metrics.bagVariance),
+      inspectionStatus: metrics.inspectionStatus,
+      checklist: nextChecklist,
+    };
+
+    await commitState((prev) => ({
+      ...prev,
+      tractors: prev.tractors.map((t) => (t.id === tractorId ? updated : t)),
+    }));
+    addAuditEntryLocal(
+      'ADMIN_UPDATE_TRACTOR',
+      'tractor_deliveries',
+      tractorId,
+      `تعديل سجل الجرار ${updated.tractorPlate} بواسطة مدير النظام`,
+      {
+        oldValue: {
+          tractorPlate: target.tractorPlate,
+          manifestNumber: target.manifestNumber,
+          manifestBags: target.manifestBags,
+          actualBags: target.actualBags,
+          approvalState: target.approvalState,
+        },
+        newValue: {
+          tractorPlate: updated.tractorPlate,
+          manifestNumber: updated.manifestNumber,
+          manifestBags: updated.manifestBags,
+          actualBags: updated.actualBags,
+          approvalState: updated.approvalState,
+        },
+      },
+    );
+    pushToast({ type: 'success', title: 'تم حفظ تعديلات سجل الجرار' });
+  };
+
   const deleteTractor = async (tractorId: string, reason?: string) => {
     const target = state.tractors.find((t) => t.id === tractorId);
     if (!target) {
@@ -1301,6 +1549,114 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
 
     pushToast({ type: 'success', title: 'تم الإرسال للمنظومة المركزية بنجاح' });
+  };
+
+  const updateIntegrationLogAdmin = async (
+    logId: string,
+    patch: { status?: 'success' | 'failed'; httpStatus?: number; responseMessage?: string },
+  ) => {
+    if (profile?.role !== 'admin') {
+      throw new Error('صلاحية تعديل سجلات التكامل مقصورة على مدير النظام فقط.');
+    }
+    const target = state.integrationLogs.find((l) => l.id === logId);
+    if (!target) throw new Error('سجل التكامل غير موجود.');
+
+    if (authMode === 'firebase' && profile) {
+      if (!isOnline) throw new Error('تعديل سجلات التكامل يتطلب اتصالًا بالإنترنت.');
+      const { auditEntry } = await updateIntegrationLogAdminFs(logId, patch, profile);
+      await commitState((prev) => ({
+        ...prev,
+        integrationLogs: prev.integrationLogs.map((l) =>
+          l.id === logId
+            ? {
+                ...l,
+                status: patch.status ?? l.status,
+                httpStatus: patch.httpStatus !== undefined ? Math.round(patch.httpStatus) : l.httpStatus,
+                responseMessage:
+                  patch.responseMessage !== undefined
+                    ? sanitizeExtractedText(patch.responseMessage).slice(0, 400)
+                    : l.responseMessage,
+              }
+            : l,
+        ),
+        auditLogs: [auditEntry, ...prev.auditLogs],
+      }));
+      pushToast({ type: 'success', title: 'تم تعديل سجل التكامل' });
+      return;
+    }
+
+    await commitState((prev) => ({
+      ...prev,
+      integrationLogs: prev.integrationLogs.map((l) =>
+        l.id === logId
+          ? {
+              ...l,
+              status: patch.status ?? l.status,
+              httpStatus: patch.httpStatus !== undefined ? Math.round(patch.httpStatus) : l.httpStatus,
+              responseMessage:
+                patch.responseMessage !== undefined
+                  ? sanitizeExtractedText(patch.responseMessage).slice(0, 400)
+                  : l.responseMessage,
+            }
+          : l,
+      ),
+    }));
+    addAuditEntryLocal(
+      'ADMIN_UPDATE_INTEGRATION_LOG',
+      'integration_logs',
+      logId,
+      `تعديل سجل التكامل للتقرير ${target.reportId}`,
+      {
+        oldValue: {
+          status: target.status,
+          httpStatus: target.httpStatus,
+          responseMessage: target.responseMessage,
+        },
+        newValue: patch,
+      },
+    );
+    pushToast({ type: 'success', title: 'تم تعديل سجل التكامل' });
+  };
+
+  const deleteIntegrationLogAdmin = async (logId: string) => {
+    if (profile?.role !== 'admin') {
+      throw new Error('صلاحية حذف سجلات التكامل مقصورة على مدير النظام فقط.');
+    }
+    const target = state.integrationLogs.find((l) => l.id === logId);
+    if (!target) throw new Error('سجل التكامل غير موجود.');
+
+    if (authMode === 'firebase' && profile) {
+      if (!isOnline) throw new Error('حذف سجلات التكامل يتطلب اتصالًا بالإنترنت.');
+      const { auditEntry } = await deleteIntegrationLogAdminFs(logId, profile);
+      await commitState((prev) => ({
+        ...prev,
+        integrationLogs: prev.integrationLogs.filter((l) => l.id !== logId),
+        auditLogs: [auditEntry, ...prev.auditLogs],
+      }));
+      pushToast({ type: 'info', title: 'تم حذف سجل التكامل' });
+      return;
+    }
+
+    await commitState((prev) => ({
+      ...prev,
+      integrationLogs: prev.integrationLogs.filter((l) => l.id !== logId),
+    }));
+    addAuditEntryLocal(
+      'ADMIN_DELETE_INTEGRATION_LOG',
+      'integration_logs',
+      logId,
+      `حذف سجل التكامل للتقرير ${target.reportId}`,
+      {
+        oldValue: {
+          reportId: target.reportId,
+          status: target.status,
+          httpStatus: target.httpStatus,
+          responseMessage: target.responseMessage,
+        },
+        newValue: { deleted: true },
+      },
+    );
+    pushToast({ type: 'info', title: 'تم حذف سجل التكامل' });
   };
 
   const transitionReportStatus = async (
@@ -1478,6 +1834,124 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }));
     addAuditEntryLocal('SAVE_ANALYZED_ATTACHMENT', 'images_attachments', saved.id, `حفظ تحليل كشف ${saved.associationName}`);
     pushToast({ type: 'success', title: 'تم حفظ نتيجة التحليل والمرفق' });
+  };
+
+  const updateAttachmentAdmin = async (
+    attachmentId: string,
+    patch: { extractedClosingBalance?: number | null; notes?: string; reportDate?: string },
+  ) => {
+    if (profile?.role !== 'admin') {
+      throw new Error('صلاحية تعديل المرفقات المحللة مقصورة على مدير النظام فقط.');
+    }
+    const target = state.attachments.find((a) => a.id === attachmentId);
+    if (!target) throw new Error('المرفق غير موجود.');
+
+    if (authMode === 'firebase' && profile) {
+      if (!isOnline) throw new Error('تعديل المرفقات يتطلب اتصالًا بالإنترنت.');
+      const { auditEntry } = await updateImageAttachmentAdminFs(attachmentId, patch, profile);
+      await commitState((prev) => ({
+        ...prev,
+        attachments: prev.attachments.map((a) => {
+          if (a.id !== attachmentId) return a;
+          const nextClosing =
+            patch.extractedClosingBalance === undefined
+              ? a.extractedClosingBalance
+              : patch.extractedClosingBalance;
+          return {
+            ...a,
+            extractedClosingBalance: nextClosing,
+            discrepancy:
+              nextClosing !== null && nextClosing !== undefined
+                ? nextClosing - a.lastRecordedBalance
+                : null,
+            notes:
+              patch.notes !== undefined ? sanitizeExtractedText(patch.notes).slice(0, 500) : a.notes,
+            reportDate: patch.reportDate ?? a.reportDate,
+          };
+        }),
+        auditLogs: [auditEntry, ...prev.auditLogs],
+      }));
+      pushToast({ type: 'success', title: 'تم تعديل المرفق المحلل' });
+      return;
+    }
+
+    await commitState((prev) => ({
+      ...prev,
+      attachments: prev.attachments.map((a) => {
+        if (a.id !== attachmentId) return a;
+        const nextClosing =
+          patch.extractedClosingBalance === undefined
+            ? a.extractedClosingBalance
+            : patch.extractedClosingBalance;
+        return {
+          ...a,
+          extractedClosingBalance: nextClosing,
+          discrepancy:
+            nextClosing !== null && nextClosing !== undefined
+              ? nextClosing - a.lastRecordedBalance
+              : null,
+          notes:
+            patch.notes !== undefined ? sanitizeExtractedText(patch.notes).slice(0, 500) : a.notes,
+          reportDate: patch.reportDate ?? a.reportDate,
+        };
+      }),
+    }));
+    addAuditEntryLocal(
+      'ADMIN_UPDATE_ATTACHMENT',
+      'images_attachments',
+      attachmentId,
+      `تعديل مرفق تحليل الكشف للجمعية ${target.associationName}`,
+      {
+        oldValue: {
+          extractedClosingBalance: target.extractedClosingBalance,
+          notes: target.notes,
+          reportDate: target.reportDate,
+        },
+        newValue: patch,
+      },
+    );
+    pushToast({ type: 'success', title: 'تم تعديل المرفق المحلل' });
+  };
+
+  const deleteAttachmentAdmin = async (attachmentId: string) => {
+    if (profile?.role !== 'admin') {
+      throw new Error('صلاحية حذف المرفقات المحللة مقصورة على مدير النظام فقط.');
+    }
+    const target = state.attachments.find((a) => a.id === attachmentId);
+    if (!target) throw new Error('المرفق غير موجود.');
+
+    if (authMode === 'firebase' && profile) {
+      if (!isOnline) throw new Error('حذف المرفقات يتطلب اتصالًا بالإنترنت.');
+      const { auditEntry } = await deleteImageAttachmentAdminFs(attachmentId, profile);
+      await commitState((prev) => ({
+        ...prev,
+        attachments: prev.attachments.filter((a) => a.id !== attachmentId),
+        auditLogs: [auditEntry, ...prev.auditLogs],
+      }));
+      pushToast({ type: 'info', title: 'تم حذف المرفق المحلل' });
+      return;
+    }
+
+    await commitState((prev) => ({
+      ...prev,
+      attachments: prev.attachments.filter((a) => a.id !== attachmentId),
+    }));
+    addAuditEntryLocal(
+      'ADMIN_DELETE_ATTACHMENT',
+      'images_attachments',
+      attachmentId,
+      `حذف مرفق تحليل الكشف للجمعية ${target.associationName}`,
+      {
+        oldValue: {
+          associationId: target.associationId,
+          associationName: target.associationName,
+          reportDate: target.reportDate,
+          extractedClosingBalance: target.extractedClosingBalance,
+        },
+        newValue: { deleted: true },
+      },
+    );
+    pushToast({ type: 'info', title: 'تم حذف المرفق المحلل' });
   };
 
   const extractManifest = async (params: { imageBase64: string; mimeType: string }) => {
@@ -1790,6 +2264,8 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
       addBulkAssociations,
       deactivateAssociation,
       reactivateAssociation,
+      countAssociationLinkedRecords,
+      deleteAssociationPermanently,
       reorderAssociations,
       saveDisbursementsBatch,
       clearDayRecords,
@@ -1797,12 +2273,17 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
       fetchAnalyticsHistory,
       createTractor,
       approveTractor,
+      updateTractorAdmin,
       deleteTractor,
       transitionReportStatus,
       syncReportCentral,
+      updateIntegrationLogAdmin,
+      deleteIntegrationLogAdmin,
       extractSheetNumbers,
       analyzeSingleSheet,
       saveAnalyzedAttachment,
+      updateAttachmentAdmin,
+      deleteAttachmentAdmin,
       extractManifest,
       createOrUpdateUser,
       deleteUser,

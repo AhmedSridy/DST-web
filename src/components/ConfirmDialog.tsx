@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { AlertTriangle, X } from 'lucide-react';
 
 interface ConfirmDialogProps {
@@ -9,11 +9,15 @@ interface ConfirmDialogProps {
   cancelLabel?: string;
   variant?: 'danger' | 'primary';
   warningNote?: string;
+  errorMessage?: string | null;
   reasonLabel?: string;
   reasonPlaceholder?: string;
   reasonValue?: string;
   onReasonChange?: (value: string) => void;
   maxReasonLength?: number;
+  confirmTextExpected?: string;
+  confirmTextLabel?: string;
+  confirmTextPlaceholder?: string;
   isSubmitting?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
@@ -27,16 +31,32 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   cancelLabel = 'إلغاء',
   variant = 'danger',
   warningNote,
+  errorMessage,
   reasonLabel,
   reasonPlaceholder,
   reasonValue = '',
   onReasonChange,
   maxReasonLength = 300,
+  confirmTextExpected,
+  confirmTextLabel,
+  confirmTextPlaceholder,
   isSubmitting = false,
   onConfirm,
   onCancel,
 }) => {
+  const [typedConfirm, setTypedConfirm] = useState('');
+
+  useEffect(() => {
+    if (!open) {
+      setTypedConfirm('');
+    }
+  }, [open, confirmTextExpected]);
+
   if (!open) return null;
+
+  const requiresTypedConfirm = Boolean(confirmTextExpected && confirmTextExpected.trim().length > 0);
+  const typedMatches =
+    !requiresTypedConfirm || typedConfirm.trim() === (confirmTextExpected || '').trim();
 
   return (
     <div
@@ -73,10 +93,35 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
         </p>
 
         {warningNote && (
-          <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-xs font-semibold text-amber-900 dark:text-amber-200">
+          <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-xs font-semibold text-amber-900 dark:text-amber-200 whitespace-pre-line">
             <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-700 dark:text-amber-400" />
             <span>{warningNote}</span>
           </div>
+        )}
+
+        {errorMessage && (
+          <div
+            role="alert"
+            className="mt-3 rounded-lg border border-rose-300 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/50 px-3 py-2 text-xs font-semibold text-rose-800 dark:text-rose-200 leading-relaxed"
+          >
+            {errorMessage}
+          </div>
+        )}
+
+        {requiresTypedConfirm && (
+          <label className="mt-4 block space-y-1.5 text-xs">
+            <span className="font-semibold text-slate-700 dark:text-slate-300">
+              {confirmTextLabel || `اكتب «${confirmTextExpected}» للتأكيد النهائي:`}
+            </span>
+            <input
+              type="text"
+              disabled={isSubmitting}
+              value={typedConfirm}
+              onChange={(e) => setTypedConfirm(e.target.value)}
+              placeholder={confirmTextPlaceholder || confirmTextExpected}
+              className="w-full rounded-lg border border-rose-300 dark:border-rose-700 bg-white dark:bg-slate-800 px-3 py-2 text-xs text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-rose-500/40 disabled:opacity-60"
+            />
+          </label>
         )}
 
         {reasonLabel && onReasonChange && (
@@ -105,9 +150,9 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
           </button>
           <button
             type="button"
-            disabled={isSubmitting}
+            disabled={isSubmitting || !typedMatches}
             onClick={onConfirm}
-            className={`rounded-lg px-4 py-2 text-sm font-medium text-white transition-colors disabled:opacity-60 whitespace-nowrap ${
+            className={`rounded-lg px-4 py-2 text-sm font-medium text-white transition-colors disabled:opacity-50 whitespace-nowrap ${
               variant === 'danger'
                 ? 'bg-rose-600 hover:bg-rose-700'
                 : 'bg-emerald-700 hover:bg-emerald-800'
@@ -120,3 +165,4 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
     </div>
   );
 };
+
