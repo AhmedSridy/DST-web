@@ -544,3 +544,180 @@ export function computeDashboardGovChartData(params: {
   });
 }
 
+/**
+ * Returns the ISO date (YYYY-MM-DD) for the same calendar day of the previous month.
+ * Clamps end-of-month dates to the last valid day of the previous month
+ * (e.g., 2026-03-31 -> 2026-02-28, 2024-03-31 -> 2024-02-29, 2026-01-15 -> 2025-12-15).
+ */
+export function getSameDayPreviousMonthIso(dateIso: string): string {
+  const parts = dateIso.split('-').map(Number);
+  const year = parts[0] || 2026;
+  const month = parts[1] || 1;
+  const day = parts[2] || 1;
+
+  const prevYear = month === 1 ? year - 1 : year;
+  const prevMonth = month === 1 ? 12 : month - 1;
+  const daysInPrevMonth = new Date(Date.UTC(prevYear, prevMonth, 0)).getUTCDate();
+  const clampedDay = Math.min(Math.max(1, day), daysInPrevMonth);
+
+  return `${String(prevYear).padStart(4, '0')}-${String(prevMonth).padStart(2, '0')}-${String(clampedDay).padStart(2, '0')}`;
+}
+
+export interface TodayVsLastMonthFertilizerBreakdown {
+  code: CoreFertilizerCode;
+  nameAr: string;
+  today: number;
+  prevMonth: number;
+  delta: number;
+}
+
+export interface TodayVsLastMonthComparison {
+  todayDate: string;
+  prevMonthDate: string;
+  todayTotal: number;
+  prevMonthTotal: number;
+  deltaBags: number;
+  percentChange: number | null;
+  direction: 'up' | 'down' | 'same';
+  hasTodayData: boolean;
+  hasPrevMonthData: boolean;
+  byFertilizer: TodayVsLastMonthFertilizerBreakdown[];
+  summaryChartData: Array<{
+    key: 'prevMonth' | 'today';
+    label: string;
+    date: string;
+    المنصرف: number;
+  }>;
+  fertilizerChartData: Array<{
+    name: string;
+    'الشهر الماضي': number;
+    'اليوم': number;
+  }>;
+}
+
+/**
+ * Compares total disbursed fertilizer bags on `todayDate` against the same day
+ * of the previous month, preserving the fixed fertilizer order (urea -> nitrate -> sulfate).
+ */
+export function computeTodayVsLastMonthDisbursement(params: {
+  reports: DailyReport[];
+  disbursements: DailyDisbursementRow[];
+  todayDate: string;
+}): TodayVsLastMonthComparison {
+  const todayDate = params.todayDate;
+  const prevMonthDate = getSameDayPreviousMonthIso(todayDate);
+  const reportDateById = new Map(params.reports.map((r) => [r.id, r.reportDate]));
+
+  const resolveRowDate = (row: DailyDisbursementRow): string | null => {
+    if (typeof row.reportId !== 'string' || !row.reportId) return null;
+    const fromReport = reportDateById.get(row.reportId);
+    if (fromReport) return fromReport;
+    const match = row.reportId.match(/(\d{4}-\d{2}-\d{2})$/);
+    return match ? match[1] : null;
+  };
+
+  const todayByFert: Record<CoreFertilizerCode, number> = { urea: 0, nitrate: 0, sulfate: 0 };
+  const prevByFert: Record<CoreFertilizerCode, number> = { urea: 0, nitrate: 0, sulfate: 0 };
+  let hasTodayData = false;
+  let hasPrevMonthData = false;
+
+  for (const row of params.disbursements) {
+    if (
+      row.fertilizerCode !== 'urea' &&
+      row.fertilizerCode !== 'nitrate' &&
+      row.fertilizerCode !== 'sulfate'
+    ) {
+      continue;
+    }
+
+    const rowDate = resolveRowDate(row);
+    if (rowDate !== todayDate && rowDate !== prevMonthDate) continue;
+
+    let disbursed: number | null =
+      row.actualDisbursed !== null && row.actualDisbursed !== undefined
+        ? Number(row.actualDisbursed)
+        : null;
+
+    if (disbursed === null && row.openingBalance !== null && row.closingBalance !== null) {
+      disbursed = computeDisbursementRow(
+        {
+          openingBalance: row.openingBalance,
+          closingBalance: row.closingBalance,
+          settlementQty: row.settlementQty,
+        },
+        false,
+      ).actualDisbursed;
+    }
+
+    if (disbursed === null || !Number.isFinite(disbursed)) continue;
+
+    if (rowDate === todayDate) {
+      todayByFert[row.fertilizerCode] += disbursed;
+      hasTodayData = true;
+    } else if (rowDate === prevMonthDate) {
+      prevByFert[row.fertilizerCode] += disbursed;
+      hasPrevMonthData = true;
+    }
+  }
+
+  const round2 = (n: number) => Number(n.toFixed(2));
+
+  const byFertilizer: TodayVsLastMonthFertilizerBreakdown[] = CORE_FERTILIZERS.map((ft) => {
+    const today = round2(todayByFert[ft.code]);
+    const prevMonth = round2(prevByFert[ft.code]);
+    return {
+      code: ft.code,
+      nameAr: ft.nameAr,
+      today,
+      prevMonth,
+      delta: round2(today - prevMonth),
+    };
+  });
+
+  const todayTotal = round2(byFertilizer.reduce((sum, item) => sum + item.today, 0));
+  const prevMonthTotal = round2(byFertilizer.reduce((sum, item) => sum + item.prevMonth, 0));
+  const deltaBags = round2(todayTotal - prevMonthTotal);
+  const direction: 'up' | 'down' | 'same' =
+    deltaBags > 0 ? 'up' : deltaBags < 0 ? 'down' : 'same';
+
+  let percentChange: number | null;
+  if (prevMonthTotal > 0) {
+    percentChange = Number((((todayTotal - prevMonthTotal) / prevMonthTotal) * 100).toFixed(1));
+  } else if (todayTotal === 0) {
+    percentChange = 0;
+  } else {
+    percentChange = null;
+  }
+
+  return {
+    todayDate,
+    prevMonthDate,
+    todayTotal,
+    prevMonthTotal,
+    deltaBags,
+    percentChange,
+    direction,
+    hasTodayData,
+    hasPrevMonthData,
+    byFertilizer,
+    summaryChartData: [
+      {
+        key: 'prevMonth',
+        label: 'الشهر الماضي',
+        date: prevMonthDate,
+        المنصرف: prevMonthTotal,
+      },
+      {
+        key: 'today',
+        label: 'اليوم',
+        date: todayDate,
+        المنصرف: todayTotal,
+      },
+    ],
+    fertilizerChartData: byFertilizer.map((f) => ({
+      name: f.nameAr,
+      'الشهر الماضي': f.prevMonth,
+      'اليوم': f.today,
+    })),
+  };
+}

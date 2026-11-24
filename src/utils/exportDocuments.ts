@@ -10,6 +10,12 @@ import type {
 } from '../types/domain.ts';
 import type { GovernorateBalanceSummary } from './analytics.ts';
 import { computeDisbursementRow, formatNumberAr } from './calculations.ts';
+import {
+  buildPdfSafeBaseCss,
+  collectDocumentFontFaceCss,
+  sanitizeClonedPdfDocument,
+  shouldIgnorePdfCloneElement,
+} from './pdfHtmlSanitizer.ts';
 
 export interface SheetExportRowInput {
   association: AgriculturalAssociation;
@@ -815,6 +821,7 @@ function createTableCell(
     align?: 'right' | 'center' | 'left';
     bold?: boolean;
     padding?: string;
+    background?: string;
     colSpan?: number;
     rowSpan?: number;
   },
@@ -823,8 +830,12 @@ function createTableCell(
     tag,
     {
       border: '1px solid #000',
-      padding: opts?.padding ?? '4px',
+      padding: opts?.padding ?? '5px 4px 7px 4px',
       textAlign: opts?.align ?? 'center',
+      verticalAlign: 'middle',
+      lineHeight: '1.45',
+      background: opts?.background ?? '#ffffff',
+      color: '#000000',
       fontWeight: opts?.bold ? '700' : tag === 'th' ? '700' : '400',
     },
     text,
@@ -838,14 +849,14 @@ function buildPdfHeaderBlock(title: string, subtitle: string): HTMLDivElement {
   const header = createStyledEl('div', {
     textAlign: 'center',
     borderBottom: '2px solid #000',
-    paddingBottom: '8px',
+    paddingBottom: '10px',
     marginBottom: '10px',
   });
   header.appendChild(
-    createStyledEl('h1', { margin: '0', fontSize: '18px', fontWeight: '800' }, title),
+    createStyledEl('h1', { margin: '0', fontSize: '18px', fontWeight: '800', lineHeight: '1.4' }, title),
   );
   header.appendChild(
-    createStyledEl('p', { margin: '4px 0 0', fontSize: '12px' }, subtitle),
+    createStyledEl('p', { margin: '4px 0 0', fontSize: '12px', lineHeight: '1.4' }, subtitle),
   );
   return header;
 }
@@ -859,14 +870,21 @@ export async function exportToPdf(
     import('jspdf'),
   ]);
 
-  const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+  const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4', compress: true });
+  const safeCss = buildPdfSafeBaseCss(collectDocumentFontFaceCss(document));
+  if (document.fonts && document.fonts.ready) {
+    await document.fonts.ready;
+  }
+
   const container = document.createElement('div');
   container.setAttribute('dir', 'rtl');
+  container.setAttribute('data-dst-pdf-container', 'true');
   Object.assign(container.style, {
     position: 'fixed',
     left: '-12000px',
     top: '0',
     width: '1120px',
+    boxSizing: 'border-box',
     background: '#ffffff',
     color: '#000000',
     fontFamily: "'IBM Plex Sans Arabic', 'Cairo', sans-serif",
@@ -882,7 +900,20 @@ export async function exportToPdf(
       backgroundColor: '#ffffff',
       useCORS: true,
       logging: false,
+      scrollX: 0,
+      scrollY: 0,
+      windowWidth: 1152,
+      ignoreElements: (el) => shouldIgnorePdfCloneElement(el, container),
+      onclone: (clonedDoc, clonedEl) => {
+        const target =
+          clonedEl ||
+          clonedDoc.querySelector<HTMLElement>('[data-dst-pdf-container="true"]');
+        return sanitizeClonedPdfDocument(clonedDoc, target, safeCss);
+      },
     });
+    if (!canvas.width || !canvas.height) {
+      throw new Error('تعذر تجهيز صفحة PDF للطباعة (أبعاد فارغة).');
+    }
     const imgData = canvas.toDataURL('image/png');
     if (!isFirstPage) pdf.addPage('a4', 'landscape');
     const pageW = pdf.internal.pageSize.getWidth();
@@ -893,7 +924,8 @@ export async function exportToPdf(
     const ratio = Math.min(availW / canvas.width, availH / canvas.height);
     const w = canvas.width * ratio;
     const h = canvas.height * ratio;
-    pdf.addImage(imgData, 'PNG', margin, margin, w, h);
+    const x = margin + (availW - w) / 2;
+    pdf.addImage(imgData, 'PNG', x, margin, w, h, undefined, 'FAST');
   };
 
   try {
@@ -957,24 +989,49 @@ export async function exportToPdf(
         const table = createStyledEl('table', {
           width: '100%',
           borderCollapse: 'collapse',
+          borderSpacing: '0',
           fontSize: '10px',
           color: '#000',
           background: '#fff',
         });
 
         const thead = document.createElement('thead');
-        const groupRow = createStyledEl('tr', { background: '#f1f5f9' });
-        groupRow.appendChild(createTableCell('th', 'الجمعية', { rowSpan: 2, padding: '5px', align: 'right' }));
+        const groupRow = document.createElement('tr');
+        groupRow.appendChild(
+          createTableCell('th', 'الجمعية', {
+            rowSpan: 2,
+            padding: '6px 6px 8px 6px',
+            align: 'right',
+            background: '#f1f5f9',
+          }),
+        );
         for (const groupLabel of ['بداية اليوم', 'نهاية اليوم', 'المنصرف', 'التسوية', 'فرق التسوية']) {
-          groupRow.appendChild(createTableCell('th', groupLabel, { colSpan: 3, padding: '4px' }));
+          groupRow.appendChild(
+            createTableCell('th', groupLabel, {
+              colSpan: 3,
+              padding: '5px 4px 7px 4px',
+              background: '#f1f5f9',
+            }),
+          );
         }
-        groupRow.appendChild(createTableCell('th', 'الحالة', { rowSpan: 2, padding: '5px' }));
+        groupRow.appendChild(
+          createTableCell('th', 'الحالة', {
+            rowSpan: 2,
+            padding: '6px 5px 8px 5px',
+            background: '#f1f5f9',
+          }),
+        );
         thead.appendChild(groupRow);
 
-        const subRow = createStyledEl('tr', { background: '#f8fafc' });
+        const subRow = document.createElement('tr');
         for (let g = 0; g < 5; g++) {
           for (const fertLabel of ['يوريا', 'نترات', 'سلفات']) {
-            subRow.appendChild(createTableCell('th', fertLabel, { padding: '3px' }));
+            subRow.appendChild(
+              createTableCell('th', fertLabel, {
+                padding: '4px 3px 6px 3px',
+                background: '#f8fafc',
+              }),
+            );
           }
         }
         thead.appendChild(subRow);
@@ -1002,7 +1059,11 @@ export async function exportToPdf(
             const anyVar = uCalc.hasVariance || nCalc.hasVariance || sCalc.hasVariance;
             const tr = document.createElement('tr');
             tr.appendChild(
-              createTableCell('td', item.association.nameAr, { align: 'right', bold: true, padding: '4px 6px' }),
+              createTableCell('td', item.association.nameAr, {
+                align: 'right',
+                bold: true,
+                padding: '4px 6px 6px 6px',
+              }),
             );
             const cellSpecs: Array<[string, boolean]> = [
               [formatNumberAr(item.urea.opening), false],
@@ -1033,12 +1094,13 @@ export async function exportToPdf(
         const isLastSheetPage = p === totalPages - 1 && sortedPdfRows.length > 0;
         if (isLastSheetPage) {
           const tfoot = document.createElement('tfoot');
-          const footTr = createStyledEl('tr', { background: '#e2e8f0', fontWeight: '800' });
+          const footTr = document.createElement('tr');
           footTr.appendChild(
             createTableCell('td', `الإجمالي (${sortedPdfRows.length})`, {
               align: 'right',
               bold: true,
-              padding: '5px 6px',
+              padding: '5px 6px 7px 6px',
+              background: '#e2e8f0',
             }),
           );
           const totalVals = [
@@ -1060,7 +1122,7 @@ export async function exportToPdf(
             'شيكارة',
           ];
           for (const val of totalVals) {
-            footTr.appendChild(createTableCell('td', val, { bold: true }));
+            footTr.appendChild(createTableCell('td', val, { bold: true, background: '#e2e8f0' }));
           }
           tfoot.appendChild(footTr);
           table.appendChild(tfoot);
@@ -1087,13 +1149,14 @@ export async function exportToPdf(
         const table = createStyledEl('table', {
           width: '100%',
           borderCollapse: 'collapse',
+          borderSpacing: '0',
           fontSize: '11px',
           color: '#000',
           background: '#fff',
         });
 
         const thead = document.createElement('thead');
-        const headTr = createStyledEl('tr', { background: '#f1f5f9' });
+        const headTr = document.createElement('tr');
         const tractorCols: Array<[string, 'right' | 'center']> = [
           ['التاريخ', 'center'],
           ['الجمعية المستلمة', 'right'],
@@ -1106,7 +1169,13 @@ export async function exportToPdf(
           ['الحالة', 'center'],
         ];
         for (const [label, align] of tractorCols) {
-          headTr.appendChild(createTableCell('th', label, { align, padding: '6px' }));
+          headTr.appendChild(
+            createTableCell('th', label, {
+              align,
+              padding: '6px 6px 8px 6px',
+              background: '#f1f5f9',
+            }),
+          );
         }
         thead.appendChild(headTr);
         table.appendChild(thead);
@@ -1136,7 +1205,7 @@ export async function exportToPdf(
               [matched ? '✔ مطابق' : '⚠ اختلاف', 'center', true],
             ];
             for (const [val, align, bold] of cells) {
-              rowEl.appendChild(createTableCell('td', val, { align, bold, padding: '5px' }));
+              rowEl.appendChild(createTableCell('td', val, { align, bold, padding: '5px 5px 7px 5px' }));
             }
             tbody.appendChild(rowEl);
           }

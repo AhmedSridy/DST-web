@@ -102,6 +102,11 @@ export const AdminAndAuditView: React.FC = () => {
     [invites, users],
   );
 
+  const legacyPasswordHashCount = useMemo(
+    () => users.filter((u) => u.hasLegacyPasswordHash).length,
+    [users],
+  );
+
   const filteredLogs = useMemo(() => {
     const q = auditSearch.trim().toLowerCase();
     if (!q) return auditLogs;
@@ -309,6 +314,37 @@ export const AdminAndAuditView: React.FC = () => {
           {authMode === 'firebase' ? 'إضافة / دعوة مستخدم بالبريد' : 'إضافة مستخدم جديد'}
         </button>
       </div>
+
+      {/* Legacy passwordHash detection alert banner */}
+      {authMode === 'firebase' && profile?.role === 'admin' && legacyPasswordHashCount > 0 && (
+        <div
+          role="alert"
+          className="rounded-xl border-2 border-rose-300 dark:border-rose-700 bg-rose-50 dark:bg-rose-950/40 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-rose-950 dark:text-rose-100"
+        >
+          <div className="flex items-start gap-2.5">
+            <ShieldAlert className="w-5 h-5 text-rose-700 dark:text-rose-400 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <p className="font-extrabold">
+                تنبيه أمني عاجل: تم رصد {legacyPasswordHashCount} مستند مستخدم ما زال يحتوي على حقل{' '}
+                <code className="font-mono-num">passwordHash</code> القديم.
+              </p>
+              <p className="leading-relaxed text-rose-900 dark:text-rose-200">
+                بعد نشر قواعد الأمان المشددة، يجب تشغيل التنظيف فورًا لإزالة هذا الحقل عبر{' '}
+                <code className="font-mono-num">deleteField()</code>، وإلا سيفشل أي تحديث مستقبلي لتلك الوثائق.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={cleaningLegacy}
+            onClick={() => void handleCleanupLegacyPasswordHashes()}
+            className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-rose-700 px-3.5 py-2 font-bold text-white hover:bg-rose-800 disabled:opacity-60 whitespace-nowrap"
+          >
+            <Sparkles className="w-4 h-4" />
+            {cleaningLegacy ? 'جارٍ التنظيف...' : 'تنظيف الوثائق الآن'}
+          </button>
+        </div>
+      )}
 
       {/* Security Notice */}
       <div className="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50/70 dark:bg-amber-950/30 p-3.5 flex items-start gap-2.5 text-xs text-amber-950 dark:text-amber-200">
@@ -670,11 +706,23 @@ export const AdminAndAuditView: React.FC = () => {
           {/* One-time Admin Security Maintenance */}
           {authMode === 'firebase' && profile?.role === 'admin' && (
             <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl p-5 space-y-2.5 text-xs">
-              <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
-                صيانة أمان وثائق المستخدمين
-              </h3>
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                  صيانة أمان وثائق المستخدمين
+                </h3>
+                {legacyPasswordHashCount > 0 ? (
+                  <span className="rounded bg-rose-100 dark:bg-rose-950/60 px-2 py-0.5 text-[11px] font-bold text-rose-800 dark:text-rose-200">
+                    {legacyPasswordHashCount} وثيقة بحاجة لتنظيف
+                  </span>
+                ) : (
+                  <span className="rounded bg-emerald-100 dark:bg-emerald-950/60 px-2 py-0.5 text-[11px] font-bold text-emerald-800 dark:text-emerald-300">
+                    سليمة
+                  </span>
+                )}
+              </div>
               <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed">
                 أداة تشغيل لمرة واحدة لإزالة أي حقل <code className="font-mono-num">passwordHash</code> قديم من مستندات <code className="font-mono-num">users</code> عبر <code className="font-mono-num">deleteField()</code>.
+                بعد نشر قواعد الأمان المشددة يُرجى تشغيل التنظيف فورًا وإلا سيفشل أي تحديث لتلك الوثائق.
               </p>
               <button
                 type="button"

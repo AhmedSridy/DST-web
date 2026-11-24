@@ -1,5 +1,10 @@
 import { initializeApp } from 'firebase/app';
-import { initializeAppCheck, ReCaptchaV3Provider } from 'firebase/app-check';
+import {
+  getToken as getAppCheckSdkToken,
+  initializeAppCheck,
+  ReCaptchaV3Provider,
+  type AppCheck,
+} from 'firebase/app-check';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 import {
   doc,
@@ -15,15 +20,26 @@ import firebaseConfig from '../../firebase-applet-config.json';
 const app = initializeApp(firebaseConfig);
 
 // Conditionally activate Firebase App Check only when VITE_RECAPTCHA_SITE_KEY is configured
+let appCheckInstance: AppCheck | null = null;
 const recaptchaSiteKey = (import.meta.env.VITE_RECAPTCHA_SITE_KEY as string | undefined)?.trim();
 if (recaptchaSiteKey && typeof window !== 'undefined') {
   try {
-    initializeAppCheck(app, {
+    appCheckInstance = initializeAppCheck(app, {
       provider: new ReCaptchaV3Provider(recaptchaSiteKey),
       isTokenAutoRefreshEnabled: true,
     });
   } catch (error) {
     console.warn('App Check initialization skipped:', error);
+  }
+}
+
+export async function getAppCheckToken(): Promise<string | null> {
+  if (!appCheckInstance) return null;
+  try {
+    const result = await getAppCheckSdkToken(appCheckInstance, false);
+    return result?.token || null;
+  } catch {
+    return null;
   }
 }
 
@@ -38,11 +54,22 @@ function createPersistentFirestore(): Firestore {
         localCache: persistentLocalCache({
           tabManager: persistentMultipleTabManager(),
         }),
+        experimentalAutoDetectLongPolling: true,
       },
       firebaseConfig.firestoreDatabaseId,
     );
   } catch {
-    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+    try {
+      return initializeFirestore(
+        app,
+        {
+          experimentalAutoDetectLongPolling: true,
+        },
+        firebaseConfig.firestoreDatabaseId,
+      );
+    } catch {
+      return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+    }
   }
 }
 
@@ -103,6 +130,9 @@ export function handleFirestoreError(
 }
 
 export async function testFirestoreConnection(): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return false;
+  }
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
     return true;

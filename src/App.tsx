@@ -1,6 +1,7 @@
 import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import {
   BarChart3,
+  Bell,
   BookOpen,
   Building2,
   CheckCircle2,
@@ -38,6 +39,9 @@ const DailyDisbursementSheet = lazy(() =>
 const BalancesView = lazy(() =>
   import('./components/BalancesView.tsx').then((m) => ({ default: m.BalancesView })),
 );
+const StockAlertsView = lazy(() =>
+  import('./components/StockAlertsView.tsx').then((m) => ({ default: m.StockAlertsView })),
+);
 const AnalyticsModal = lazy(() =>
   import('./components/AnalyticsModal.tsx').then((m) => ({ default: m.AnalyticsModal })),
 );
@@ -68,6 +72,7 @@ const ArabicUserGuideView = lazy(() =>
 );
 import type { GranularPermissions, UserRole } from './types/domain.ts';
 import { computeLowBalanceAlerts, computeOverdueReport } from './utils/analytics.ts';
+import { evaluateStockAlertRules } from './utils/stockAlerts.ts';
 import {
   getVisibleGovernorates,
   hasGranularAccess,
@@ -93,6 +98,7 @@ const NAV_ITEMS: NavItem[] = [
     permission: 'view_dashboard',
     granularFlag: 'canViewBalances',
   },
+  { id: 'stock_alerts', label: 'تنبيهات المخزون', icon: Bell, permission: 'view_dashboard' },
   { id: 'tractors', label: 'الجرارات والبوليصات', icon: Truck, permission: 'view_dashboard' },
   {
     id: 'ai_analysis',
@@ -121,6 +127,7 @@ const WorkspaceShell: React.FC = () => {
     reports,
     disbursements,
     settings,
+    stockAlertRules,
     offlineQueue,
     isSyncing,
     syncNow,
@@ -148,6 +155,21 @@ const WorkspaceShell: React.FC = () => {
   );
   const primaryGovId = visibleGovernorates[0]?.id || 'gov-ismailia';
   const canViewAnalytics = hasGranularAccess(profile, 'canViewAnalytics');
+
+  const triggeredInAppStockAlertCount = useMemo(() => {
+    if (!profile || stockAlertRules.length === 0) return 0;
+    const allowedGovIds = new Set(visibleGovernorates.map((g) => g.id));
+    const scopedRules = stockAlertRules.filter((r) => allowedGovIds.has(r.governorateId));
+    if (scopedRules.length === 0) return 0;
+    return evaluateStockAlertRules({
+      rules: scopedRules,
+      governorates: visibleGovernorates,
+      associations,
+      reports,
+      disbursements,
+      upToDate: getTodayDateIso(),
+    }).triggeredInApp.length;
+  }, [associations, disbursements, profile, reports, stockAlertRules, visibleGovernorates]);
 
   useEffect(() => {
     if (!canViewAnalytics || !profile) return;
@@ -291,6 +313,26 @@ const WorkspaceShell: React.FC = () => {
             </div>
           )}
 
+          <button
+            type="button"
+            onClick={() => setActiveTab('stock_alerts')}
+            aria-label={`تنبيهات المخزون النشطة: ${triggeredInAppStockAlertCount}`}
+            title="تنبيهات مخزون الأسمدة بالجمعيات"
+            className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-bold transition-colors whitespace-nowrap ${
+              triggeredInAppStockAlertCount > 0
+                ? 'border-rose-300 dark:border-rose-700 bg-rose-50 dark:bg-rose-950/60 text-rose-800 dark:text-rose-200 hover:bg-rose-100'
+                : 'border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700'
+            }`}
+          >
+            <Bell className="w-3.5 h-3.5 shrink-0" />
+            <span className="hidden sm:inline">تنبيهات المخزون</span>
+            {triggeredInAppStockAlertCount > 0 && (
+              <span className="inline-flex min-w-5 h-5 items-center justify-center rounded-full bg-rose-600 px-1.5 text-[11px] font-extrabold text-white tabular-nums">
+                {triggeredInAppStockAlertCount}
+              </span>
+            )}
+          </button>
+
           {canViewAnalytics && (
             <button
               type="button"
@@ -379,7 +421,12 @@ const WorkspaceShell: React.FC = () => {
                     active ? 'text-emerald-700 dark:text-emerald-400' : 'text-slate-500 dark:text-slate-400'
                   }`}
                 />
-                <span>{item.label}</span>
+                <span className="flex-1 text-right">{item.label}</span>
+                {item.id === 'stock_alerts' && triggeredInAppStockAlertCount > 0 && (
+                  <span className="inline-flex min-w-5 h-5 items-center justify-center rounded-full bg-rose-600 px-1.5 text-[11px] font-extrabold text-white tabular-nums">
+                    {triggeredInAppStockAlertCount}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -411,7 +458,12 @@ const WorkspaceShell: React.FC = () => {
                     }`}
                   >
                     <Icon className="w-4 h-4 shrink-0" />
-                    <span>{item.label}</span>
+                    <span className="flex-1 text-right">{item.label}</span>
+                    {item.id === 'stock_alerts' && triggeredInAppStockAlertCount > 0 && (
+                      <span className="inline-flex min-w-5 h-5 items-center justify-center rounded-full bg-rose-600 px-1.5 text-[11px] font-extrabold text-white tabular-nums">
+                        {triggeredInAppStockAlertCount}
+                      </span>
+                    )}
                   </button>
                 );
               })}
@@ -449,6 +501,7 @@ const WorkspaceShell: React.FC = () => {
               />
             )}
             {activeNav?.id === 'balances' && <BalancesView />}
+            {activeNav?.id === 'stock_alerts' && <StockAlertsView />}
             {activeNav?.id === 'tractors' && <TractorsView />}
             {activeNav?.id === 'ai_analysis' && <AiImageAnalysisView />}
             {activeNav?.id === 'associations' && (

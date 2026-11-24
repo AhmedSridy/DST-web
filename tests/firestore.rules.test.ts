@@ -227,6 +227,52 @@ test('daily_reports update: requires valid transition, atomic approval doc, non-
     await assertFails(batch.commit());
   }
 
+  // 4b) Approval record with mismatched fromStatus fails
+  {
+    const batch = writeBatch(chiefDb);
+    batch.update(doc(chiefDb, 'daily_reports', 'rep_1'), {
+      status: 'approved',
+      rejectionReason: '',
+      lastApprovalId: 'app_bad_from_status',
+      updatedAt: serverTimestamp(),
+    });
+    batch.set(doc(chiefDb, 'approvals', 'app_bad_from_status'), {
+      reportId: 'rep_1',
+      governorateId: 'gov-ismailia',
+      reportDate: '2026-10-10',
+      action: 'approved',
+      fromStatus: 'draft', // existing report is under_review
+      toStatus: 'approved',
+      actorUid: 'chief_all',
+      actorRole: 'chief',
+      createdAt: serverTimestamp(),
+    });
+    await assertFails(batch.commit());
+  }
+
+  // 4c) Approval record with mismatched governorateId fails
+  {
+    const batch = writeBatch(chiefDb);
+    batch.update(doc(chiefDb, 'daily_reports', 'rep_1'), {
+      status: 'approved',
+      rejectionReason: '',
+      lastApprovalId: 'app_bad_gov',
+      updatedAt: serverTimestamp(),
+    });
+    batch.set(doc(chiefDb, 'approvals', 'app_bad_gov'), {
+      reportId: 'rep_1',
+      governorateId: 'gov-suez', // existing report is gov-ismailia
+      reportDate: '2026-10-10',
+      action: 'approved',
+      fromStatus: 'under_review',
+      toStatus: 'approved',
+      actorUid: 'chief_all',
+      actorRole: 'chief',
+      createdAt: serverTimestamp(),
+    });
+    await assertFails(batch.commit());
+  }
+
   // 5) Chief atomic approval of another user's report succeeds
   {
     const batch = writeBatch(chiefDb);
@@ -522,4 +568,94 @@ test('admin full permissions: delete associations, update/delete integration_log
   await assertFails(deleteDoc(doc(adminDb, 'system_settings', 'global')));
   await assertFails(deleteDoc(doc(adminDb, 'users', 'admin_1'))); // Cannot self-delete
 });
+
+test('stock_alert_rules: enforces governorate scoping, role permissions, schema, dismiss/reset, and immutable identity keys', async () => {
+  const staffDb = authedDb('staff_ism', 'staff@dst.test');
+  const supDb = authedDb('sup_ism', 'sup@dst.test');
+  const viewerDb = authedDb('viewer_ism', 'viewer@dst.test');
+
+  const validRule = {
+    governorateId: 'gov-ismailia',
+    associationId: 'assoc_1',
+    fertilizerCode: 'urea',
+    minThreshold: 50,
+    notifyInApp: true,
+    notifyEmail: true,
+    recipientEmail: 'staff@dst.test',
+    isEnabled: true,
+    status: 'active',
+    dismissedAt: null,
+    dismissedBalance: null,
+    dismissedDate: null,
+    lastEmailSentAt: null,
+    lastEmailStatus: null,
+    lastEmailMessage: '',
+    createdByUid: 'staff_ism',
+    createdByName: 'موظف الإسماعيلية',
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+
+  // Viewer cannot create alert rules
+  await assertFails(
+    setDoc(doc(viewerDb, 'stock_alert_rules', 'rule_viewer_bad'), {
+      ...validRule,
+      createdByUid: 'viewer_ism',
+    }),
+  );
+
+  // Cross-governorate create denied
+  await assertFails(
+    setDoc(doc(staffDb, 'stock_alert_rules', 'rule_cross_gov'), {
+      ...validRule,
+      governorateId: 'gov-port-said',
+    }),
+  );
+
+  // Neither channel enabled is rejected by schema validator
+  await assertFails(
+    setDoc(doc(staffDb, 'stock_alert_rules', 'rule_no_channel'), {
+      ...validRule,
+      notifyInApp: false,
+      notifyEmail: false,
+    }),
+  );
+
+  // Active scoped field_staff can create rule
+  await assertSucceeds(setDoc(doc(staffDb, 'stock_alert_rules', 'rule_ism_1'), validRule));
+
+  // Mutating immutable associationId fails
+  await assertFails(
+    updateDoc(doc(staffDb, 'stock_alert_rules', 'rule_ism_1'), {
+      associationId: 'assoc_2',
+      updatedAt: serverTimestamp(),
+    }),
+  );
+
+  // Creator can dismiss the alert
+  await assertSucceeds(
+    updateDoc(doc(staffDb, 'stock_alert_rules', 'rule_ism_1'), {
+      status: 'dismissed',
+      dismissedAt: '2026-10-10T10:00:00Z',
+      dismissedBalance: 35,
+      dismissedDate: '2026-10-10',
+      updatedAt: serverTimestamp(),
+    }),
+  );
+
+  // Supervisor in same governorate can reset the dismissed alert back to active
+  await assertSucceeds(
+    updateDoc(doc(supDb, 'stock_alert_rules', 'rule_ism_1'), {
+      status: 'active',
+      dismissedAt: null,
+      dismissedBalance: null,
+      dismissedDate: null,
+      updatedAt: serverTimestamp(),
+    }),
+  );
+
+  // Creator can delete their own rule
+  await assertSucceeds(deleteDoc(doc(staffDb, 'stock_alert_rules', 'rule_ism_1')));
+});
+
 

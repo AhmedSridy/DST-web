@@ -26,24 +26,31 @@ import {
   deleteAssociationPermanentlyFs,
   deleteImageAttachmentAdminFs,
   deleteIntegrationLogAdminFs,
+  deleteStockAlertRuleFs,
   deleteTractorFs,
   deleteUserOrInviteFs,
+  dismissStockAlertRuleFs,
   fetchAnalyticsHistoryFs,
   fetchBootstrapDataFs,
   processOfflineBatchFs,
+  recordStockAlertEmailResultFs,
   reorderAssociationsFs,
+  resetStockAlertRuleFs,
   restoreBackupSnapshotFs,
   restoreDayRecordsFs,
   saveAssociationFs,
   saveDisbursementsBatchFs,
   saveImageAttachmentFs,
+  saveStockAlertRuleFs,
   setAssociationActiveFs,
+  toggleStockAlertRuleEnabledFs,
   transitionReportStatusFs,
   updateImageAttachmentAdminFs,
   updateIntegrationLogAdminFs,
   updateSystemSettingsFs,
   updateTractorAdminFs,
   type AssociationLinkedRecordCounts,
+  type SaveStockAlertRuleInput,
 } from '../lib/firestoreRepo.ts';
 import type {
   AgriculturalAssociation,
@@ -66,13 +73,22 @@ import type {
   RoleDefinition,
   SheetOcrExtractedRow,
   SheetSectionType,
+  StockAlertEmailStatus,
+  StockAlertRule,
   SystemSettings,
   TractorDelivery,
   UserInvite,
   UserProfile,
   UserRole,
 } from '../types/domain.ts';
+import { getAppCheckToken } from '../lib/firebase.ts';
 import { addDaysIso } from '../utils/analytics.ts';
+import { stripSensitiveUserFields } from '../utils/disbursementDedup.ts';
+import {
+  evaluateStockAlertRules,
+  validateStockAlertRuleInput,
+  type EvaluatedStockAlert,
+} from '../utils/stockAlerts.ts';
 import {
   MAX_ASSOCIATION_NAME_LENGTH,
   normalizeArabicName,
@@ -98,20 +114,11 @@ import {
   hasPermission,
 } from '../utils/rbac.ts';
 import { IS_PREVIEW_MODE_ENABLED, PREVIEW_USERS, useAuth } from './AuthContext.tsx';
+import { OcrClientError, resilientApiFetch } from '../utils/apiFetch.ts';
 import type { ToastMessage } from '../components/ToastContainer.tsx';
 import { useOnlineStatus } from '../components/PwaControls.tsx';
 
-export class OcrClientError extends Error {
-  code?: string;
-  rawResponseText?: string;
-
-  constructor(message: string, code?: string, rawResponseText?: string) {
-    super(message);
-    this.name = 'OcrClientError';
-    this.code = code;
-    this.rawResponseText = rawResponseText;
-  }
-}
+export { OcrClientError };
 
 interface AppDataState {
   roles: RoleDefinition[];
@@ -128,6 +135,7 @@ interface AppDataState {
   attachments: ImageAttachmentRecord[];
   settings: SystemSettings;
   notifications: AppNotification[];
+  stockAlertRules: StockAlertRule[];
   auditLogs: AuditLogEntry[];
   users: UserProfile[];
   invites: UserInvite[];
@@ -279,6 +287,16 @@ interface AppDataContextValue extends AppDataState {
   ) => Promise<void>;
   cleanupLegacyPasswordHashes: () => Promise<{ scanned: number; cleaned: number }>;
   updateSettings: (input: Partial<SystemSettings>) => Promise<void>;
+  smtpEmailConfigured: boolean | null;
+  saveStockAlertRule: (input: SaveStockAlertRuleInput) => Promise<void>;
+  dismissStockAlertRule: (ruleId: string, balance: number | null, date: string | null) => Promise<void>;
+  resetStockAlertRule: (ruleId: string) => Promise<void>;
+  resetAllDismissedStockAlerts: (ruleIds: string[]) => Promise<void>;
+  toggleStockAlertRuleEnabled: (ruleId: string, isEnabled: boolean) => Promise<void>;
+  deleteStockAlertRule: (ruleId: string) => Promise<void>;
+  sendStockAlertEmailNow: (
+    item: EvaluatedStockAlert,
+  ) => Promise<{ ok: boolean; status: StockAlertEmailStatus; message: string }>;
   exportBackupJson: () => string;
   restoreBackupJson: (rawJson: string) => Promise<void>;
   addAuditEntryLocal: (
@@ -318,6 +336,7 @@ function buildInitialSeedState(_currentUser?: UserProfile | null): AppDataState 
     attachments: SEED_IMAGE_ATTACHMENTS,
     settings: SEED_SYSTEM_SETTINGS,
     notifications: [],
+    stockAlertRules: [],
     auditLogs: createSeedAuditLogs(today),
     users: IS_PREVIEW_MODE_ENABLED ? Object.values(PREVIEW_USERS) : [],
     invites: [],
@@ -331,6 +350,7 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [loadingData, setLoadingData] = useState(false);
   const [offlineQueue, setOfflineQueue] = useState<OfflineQueueItem[]>([]);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [smtpEmailConfigured, setSmtpEmailConfigured] = useState<boolean | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     try {
@@ -371,34 +391,10 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const apiFetch = useCallback(
     async <T,>(url: string, options?: RequestInit): Promise<T> => {
-      const token = await getIdToken();
-      if (!token) {
-        throw new Error('يجب تسجيل الدخول بحساب Google المعتمد لإجراء هذا الطلب مع خدمة الذكاء الاصطناعي.');
-      }
-      const res = await fetch(url, {
-        ...options,
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-          ...(options?.headers || {}),
-        },
+      return resilientApiFetch<T>(url, options, {
+        getIdToken,
+        getAppCheckToken,
       });
-      const json = (await res.json().catch(() => ({}))) as T & {
-        error?: string;
-        code?: string;
-        rawResponseText?: string;
-      };
-      if (!res.ok) {
-        if (json.rawResponseText !== undefined || json.code) {
-          throw new OcrClientError(
-            json.error || `خطأ في الخادم (${res.status})`,
-            json.code,
-            json.rawResponseText,
-          );
-        }
-        throw new Error(json.error || `خطأ في الخادم (${res.status})`);
-      }
-      return json;
     },
     [getIdToken],
   );
@@ -416,6 +412,7 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
           ...cached,
           associations: sortAssociationsByOrder(cached.associations || SEED_ASSOCIATIONS),
           invites: cached.invites || [],
+          stockAlertRules: Array.isArray(cached.stockAlertRules) ? cached.stockAlertRules : [],
           settings: { ...SEED_SYSTEM_SETTINGS, ...(cached.settings || {}) },
           roles: cached.roles?.length >= SEED_ROLES.length ? cached.roles : SEED_ROLES,
           governorates:
@@ -438,7 +435,12 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
     try {
       if (!isOnline) {
         const cached = await loadCachedSnapshot<AppDataState>(APP_CACHE_KEY);
-        if (cached) setState(cached);
+        if (cached) {
+          setState({
+            ...cached,
+            stockAlertRules: Array.isArray(cached.stockAlertRules) ? cached.stockAlertRules : [],
+          });
+        }
         return;
       }
       const data = await fetchBootstrapDataFs(profile);
@@ -447,7 +449,10 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
     } catch (error: unknown) {
       const cached = await loadCachedSnapshot<AppDataState>(APP_CACHE_KEY);
       if (cached) {
-        setState(cached);
+        setState({
+          ...cached,
+          stockAlertRules: Array.isArray(cached.stockAlertRules) ? cached.stockAlertRules : [],
+        });
       }
       pushToast({
         type: 'warning',
@@ -462,6 +467,25 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
   useEffect(() => {
     void refreshData();
   }, [refreshData]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (authMode !== 'firebase' || profile?.role !== 'admin' || !isOnline) {
+      setSmtpEmailConfigured(false);
+      return;
+    }
+    void (async () => {
+      try {
+        const res = await apiFetch<{ configured: boolean }>('/api/alerts/email-status');
+        if (!cancelled) setSmtpEmailConfigured(Boolean(res.configured));
+      } catch {
+        if (!cancelled) setSmtpEmailConfigured(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiFetch, authMode, isOnline, profile]);
 
   const syncNow = useCallback(async () => {
     const queue = await getOfflineQueue();
@@ -919,6 +943,7 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
       disbursements: prev.disbursements.filter((d) => d.associationId !== associationId),
       tractors: prev.tractors.filter((t) => t.associationId !== associationId),
       attachments: prev.attachments.filter((att) => att.associationId !== associationId),
+      stockAlertRules: prev.stockAlertRules.filter((r) => r.associationId !== associationId),
     }));
     addAuditEntryLocal(
       'DELETE_ASSOCIATION_PERMANENT',
@@ -1025,6 +1050,11 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
           { ...params, treatEmptyAsZero: state.settings.treatEmptyAsZero },
           profile,
         );
+        const nextDisbMap = new Map(state.disbursements.map((d) => [d.id, d]));
+        for (const r of res.rows) nextDisbMap.set(r.id, r);
+        const nextReports = state.reports.some((rep) => rep.id === res.report.id)
+          ? state.reports.map((rep) => (rep.id === res.report.id ? res.report : rep))
+          : [res.report, ...state.reports];
         await commitState((prev) => {
           const map = new Map(prev.disbursements.map((d) => [d.id, d]));
           for (const r of res.rows) map.set(r.id, r);
@@ -1039,69 +1069,127 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
           };
         });
         pushToast({ type: 'success', title: 'تم حفظ كشف الصرف اليومي' });
+        const savedKeys = new Set(params.rows.map((r) => `${r.associationId}::${r.fertilizerCode}`));
+        const evalRes = evaluateStockAlertRules({
+          rules: state.stockAlertRules,
+          governorates: state.governorates,
+          associations: state.associations,
+          reports: nextReports,
+          disbursements: Array.from(nextDisbMap.values()),
+          upToDate: params.reportDate,
+        });
+        const newlyHit = evalRes.triggeredInApp.filter((t) =>
+          savedKeys.has(`${t.rule.associationId}::${t.rule.fertilizerCode}`),
+        );
+        if (newlyHit.length > 0) {
+          pushToast({
+            type: 'warning',
+            title: `تنبيه مخزون منخفض (${newlyHit.length})`,
+            description: newlyHit
+              .slice(0, 2)
+              .map(
+                (t) =>
+                  `${t.associationName} (${t.fertilizerNameAr}): الرصيد ${t.currentBalance} (الحد الأدنى ${t.rule.minThreshold})`,
+              )
+              .join(' · '),
+          });
+        }
         return;
       }
     }
 
     const reportId = `rep-${params.governorateId}-${params.reportDate}`;
     const now = new Date().toISOString();
-    await commitState((prev) => {
-      const existingReport = prev.reports.find((r) => r.id === reportId);
-      const report: DailyReport = existingReport
-        ? { ...existingReport, updatedAt: now }
-        : {
-            id: reportId,
-            governorateId: params.governorateId,
-            reportDate: params.reportDate,
-            status: 'draft',
-            createdByUid: profile?.uid || 'local',
-            createdByName: profile?.displayName || 'مستخدم المنظومة',
-            centralSyncStatus: 'pending',
-            createdAt: now,
-            updatedAt: now,
-          };
-
-      const map = new Map(prev.disbursements.map((d) => [d.id, d]));
-      for (const r of params.rows) {
-        const calc = computeDisbursementRow(r, prev.settings.treatEmptyAsZero);
-        const existingLocal = prev.disbursements.find(
-          (d) =>
-            d.reportId === reportId &&
-            d.associationId === r.associationId &&
-            d.fertilizerCode === r.fertilizerCode,
-        );
-        const rowId = existingLocal
-          ? existingLocal.id
-          : `${reportId}_${r.associationId}_${r.fertilizerCode}`;
-        map.set(rowId, {
-          id: rowId,
-          reportId,
+    const previewExistingReport = state.reports.find((r) => r.id === reportId);
+    const previewReport: DailyReport = previewExistingReport
+      ? { ...previewExistingReport, updatedAt: now }
+      : {
+          id: reportId,
           governorateId: params.governorateId,
-          associationId: r.associationId,
-          fertilizerCode: r.fertilizerCode,
-          openingBalance: r.openingBalance === null ? null : Number(r.openingBalance),
-          closingBalance: r.closingBalance === null ? null : Number(r.closingBalance),
-          settlementQty: r.settlementQty === null ? null : Number(r.settlementQty),
-          actualDisbursed: calc.actualDisbursed,
-          variance: calc.variance,
-          varianceReason: sanitizeExtractedText(r.varianceReason || ''),
+          reportDate: params.reportDate,
+          status: 'draft',
+          createdByUid: profile?.uid || 'local',
+          createdByName: profile?.displayName || 'مستخدم المنظومة',
+          centralSyncStatus: 'pending',
+          createdAt: now,
           updatedAt: now,
-        });
-      }
+        };
+    const previewDisbMap = new Map(state.disbursements.map((d) => [d.id, d]));
+    for (const r of params.rows) {
+      const calc = computeDisbursementRow(r, state.settings.treatEmptyAsZero);
+      const existingLocal = state.disbursements.find(
+        (d) =>
+          d.reportId === reportId &&
+          d.associationId === r.associationId &&
+          d.fertilizerCode === r.fertilizerCode,
+      );
+      const rowId = existingLocal
+        ? existingLocal.id
+        : `${reportId}_${r.associationId}_${r.fertilizerCode}`;
+      previewDisbMap.set(rowId, {
+        id: rowId,
+        reportId,
+        governorateId: params.governorateId,
+        associationId: r.associationId,
+        fertilizerCode: r.fertilizerCode,
+        openingBalance: r.openingBalance === null ? null : Number(r.openingBalance),
+        closingBalance: r.closingBalance === null ? null : Number(r.closingBalance),
+        settlementQty: r.settlementQty === null ? null : Number(r.settlementQty),
+        actualDisbursed: calc.actualDisbursed,
+        variance: calc.variance,
+        varianceReason: sanitizeExtractedText(r.varianceReason || ''),
+        updatedAt: now,
+      });
+    }
+    const previewNextReports = previewExistingReport
+      ? state.reports.map((rep) => (rep.id === reportId ? previewReport : rep))
+      : [previewReport, ...state.reports];
+    const previewNextDisb = Array.from(previewDisbMap.values());
 
-      return {
-        ...prev,
-        reports: existingReport
-          ? prev.reports.map((rep) => (rep.id === reportId ? report : rep))
-          : [report, ...prev.reports],
-        disbursements: Array.from(map.values()),
-      };
-    });
+    await commitState((prev) => ({
+      ...prev,
+      reports: prev.reports.some((rep) => rep.id === reportId)
+        ? prev.reports.map((rep) => (rep.id === reportId ? previewReport : rep))
+        : [previewReport, ...prev.reports],
+      disbursements: (() => {
+        const m = new Map(prev.disbursements.map((d) => [d.id, d]));
+        for (const r of previewNextDisb) {
+          if (r.reportId === reportId) m.set(r.id, r);
+        }
+        return Array.from(m.values());
+      })(),
+    }));
     addAuditEntryLocal('SAVE_DAILY_DISBURSEMENTS', 'daily_reports', reportId, 'حفظ بيانات كشف الصرف اليومي');
     pushToast({
       type: !isOnline && authMode === 'firebase' ? 'warning' : 'success',
       title: !isOnline && authMode === 'firebase' ? 'تم الحفظ محليًا بانتظار المزامنة' : 'تم حفظ كشف الصرف اليومي',
     });
+
+    const savedKeys = new Set(params.rows.map((r) => `${r.associationId}::${r.fertilizerCode}`));
+    const evalRes = evaluateStockAlertRules({
+      rules: state.stockAlertRules,
+      governorates: state.governorates,
+      associations: state.associations,
+      reports: previewNextReports,
+      disbursements: previewNextDisb,
+      upToDate: params.reportDate,
+    });
+    const newlyHit = evalRes.triggeredInApp.filter((t) =>
+      savedKeys.has(`${t.rule.associationId}::${t.rule.fertilizerCode}`),
+    );
+    if (newlyHit.length > 0) {
+      pushToast({
+        type: 'warning',
+        title: `تنبيه مخزون منخفض (${newlyHit.length})`,
+        description: newlyHit
+          .slice(0, 2)
+          .map(
+            (t) =>
+              `${t.associationName} (${t.fertilizerNameAr}): الرصيد ${t.currentBalance} (الحد الأدنى ${t.rule.minThreshold})`,
+          )
+          .join(' · '),
+      });
+    }
   };
 
   const clearDayRecords = async (
@@ -1510,12 +1598,16 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
     if (!token) {
       throw new Error('تعذر الحصول على رمز التحقق للمستخدم. أعد تسجيل الدخول بحساب Google.');
     }
+    const appCheckToken = await getAppCheckToken();
 
     const res = await fetch('/api/central/sync', {
       method: 'POST',
+      cache: 'no-store',
+      credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
+        'X-Firebase-Auth': token,
+        ...(appCheckToken ? { 'X-Firebase-AppCheck': appCheckToken } : {}),
       },
       body: JSON.stringify({ reportId }),
     });
@@ -1775,9 +1867,14 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
     sectionType: SheetSectionType;
     governorateId: string;
   }) => {
-    const govAssocs = state.associations.filter(
-      (a) => a.governorateId === params.governorateId && a.isActive,
-    );
+    const govAssocs = state.associations
+      .filter((a) => a.governorateId === params.governorateId && a.isActive)
+      .map((a) => ({
+        id: a.id,
+        nameAr: a.nameAr,
+        code: a.code,
+        governorateId: a.governorateId,
+      }));
     return apiFetch<{ rows: SheetOcrExtractedRow[]; summaryNote: string; rawResponseText: string }>(
       '/api/ai/extract-sheet-numbers',
       {
@@ -1959,8 +2056,19 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
       method: 'POST',
       body: JSON.stringify({
         ...params,
-        governorates: state.governorates,
-        associations: state.associations.filter((a) => a.isActive),
+        governorates: state.governorates.map((g) => ({
+          id: g.id,
+          nameAr: g.nameAr,
+          code: g.code,
+        })),
+        associations: state.associations
+          .filter((a) => a.isActive)
+          .map((a) => ({
+            id: a.id,
+            nameAr: a.nameAr,
+            code: a.code,
+            governorateId: a.governorateId,
+          })),
       }),
     });
   };
@@ -2144,6 +2252,16 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
       return { scanned: state.users.length, cleaned: 0 };
     }
     const res = await cleanupLegacyPasswordHashesFs(profile);
+    if (res.cleaned > 0) {
+      await commitState((prev) => ({
+        ...prev,
+        users: prev.users.map((u) => {
+          const copy = { ...u };
+          delete copy.hasLegacyPasswordHash;
+          return copy;
+        }),
+      }));
+    }
     pushToast({
       type: 'success',
       title: 'اكتمل فحص وتنظيف وثائق المستخدمين',
@@ -2184,6 +2302,416 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
     pushToast({ type: 'success', title: 'تم حفظ إعدادات المنظومة' });
   };
 
+  const saveStockAlertRule = async (input: SaveStockAlertRuleInput) => {
+    if (!profile || profile.role === 'viewer') {
+      throw new Error('حساب المشاهدة فقط لا يملك صلاحية إنشاء أو تعديل قواعد تنبيه المخزون.');
+    }
+    if (!canAccessGovernorate(profile, input.governorateId)) {
+      throw new Error('ليس لديك صلاحية الوصول إلى هذه المحافظة.');
+    }
+
+    const cleanEmail = input.recipientEmail.trim().slice(0, 160);
+    const validation = validateStockAlertRuleInput({
+      governorateId: input.governorateId,
+      associationId: input.associationId,
+      fertilizerCode: input.fertilizerCode,
+      minThreshold: Number(input.minThreshold),
+      notifyInApp: Boolean(input.notifyInApp),
+      notifyEmail: Boolean(input.notifyEmail),
+      recipientEmail: cleanEmail,
+    });
+    if (!validation.ok) {
+      throw new Error(validation.error);
+    }
+
+    // If creating a new rule for an existing (associationId, fertilizerCode) pair, update that rule instead of duplicating
+    const existingDuplicate = !input.id
+      ? state.stockAlertRules.find(
+          (r) =>
+            r.associationId === input.associationId &&
+            r.fertilizerCode === input.fertilizerCode &&
+            (profile.role === 'admin' ||
+              profile.role === 'supervisor' ||
+              profile.role === 'chief' ||
+              r.createdByUid === profile.uid),
+        )
+      : undefined;
+
+    const effectiveInput: SaveStockAlertRuleInput = existingDuplicate
+      ? { ...input, id: existingDuplicate.id }
+      : input;
+
+    if (authMode === 'firebase') {
+      if (!isOnline) {
+        throw new Error('تعديل قواعد تنبيه المخزون في الوضع السحابي يتطلب اتصالًا بالإنترنت.');
+      }
+      const { rule, auditEntry } = await saveStockAlertRuleFs(effectiveInput, profile);
+      await commitState((prev) => {
+        const exists = prev.stockAlertRules.some((r) => r.id === rule.id);
+        return {
+          ...prev,
+          stockAlertRules: exists
+            ? prev.stockAlertRules.map((r) => (r.id === rule.id ? rule : r))
+            : [rule, ...prev.stockAlertRules],
+          auditLogs: [auditEntry, ...prev.auditLogs],
+        };
+      });
+      pushToast({
+        type: 'success',
+        title: effectiveInput.id ? 'تم تحديث قاعدة تنبيه المخزون' : 'تم إنشاء قاعدة تنبيه المخزون',
+      });
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const ruleId =
+      effectiveInput.id || `salert-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const existingLocal = state.stockAlertRules.find((r) => r.id === ruleId);
+    const nextRule: StockAlertRule = existingLocal
+      ? {
+          ...existingLocal,
+          minThreshold: Number(effectiveInput.minThreshold),
+          notifyInApp: Boolean(effectiveInput.notifyInApp),
+          notifyEmail: Boolean(effectiveInput.notifyEmail),
+          recipientEmail: effectiveInput.notifyEmail ? cleanEmail : '',
+          isEnabled:
+            effectiveInput.isEnabled !== undefined
+              ? Boolean(effectiveInput.isEnabled)
+              : existingLocal.isEnabled,
+          status: 'active',
+          dismissedAt: null,
+          dismissedBalance: null,
+          dismissedDate: null,
+          updatedAt: nowIso,
+        }
+      : {
+          id: ruleId,
+          governorateId: effectiveInput.governorateId,
+          associationId: effectiveInput.associationId,
+          fertilizerCode: effectiveInput.fertilizerCode,
+          minThreshold: Number(effectiveInput.minThreshold),
+          notifyInApp: Boolean(effectiveInput.notifyInApp),
+          notifyEmail: Boolean(effectiveInput.notifyEmail),
+          recipientEmail: effectiveInput.notifyEmail ? cleanEmail : '',
+          isEnabled: effectiveInput.isEnabled !== false,
+          status: 'active',
+          dismissedAt: null,
+          dismissedBalance: null,
+          dismissedDate: null,
+          lastEmailSentAt: null,
+          lastEmailStatus: null,
+          lastEmailMessage: '',
+          createdByUid: profile.uid,
+          createdByName: profile.displayName,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        };
+
+    await commitState((prev) => ({
+      ...prev,
+      stockAlertRules: existingLocal
+        ? prev.stockAlertRules.map((r) => (r.id === ruleId ? nextRule : r))
+        : [nextRule, ...prev.stockAlertRules],
+    }));
+    addAuditEntryLocal(
+      existingLocal ? 'UPDATE_STOCK_ALERT_RULE' : 'CREATE_STOCK_ALERT_RULE',
+      'stock_alert_rules',
+      ruleId,
+      `${existingLocal ? 'تحديث' : 'إنشاء'} قاعدة تنبيه مخزون (${nextRule.fertilizerCode}) — الحد الأدنى ${nextRule.minThreshold}`,
+    );
+    pushToast({
+      type: 'success',
+      title: existingLocal ? 'تم تحديث قاعدة تنبيه المخزون' : 'تم إنشاء قاعدة تنبيه المخزون',
+    });
+  };
+
+  const dismissStockAlertRule = async (
+    ruleId: string,
+    balance: number | null,
+    date: string | null,
+  ) => {
+    if (!profile || profile.role === 'viewer') {
+      throw new Error('حساب المشاهدة فقط لا يملك صلاحية تجاهل التنبيهات.');
+    }
+    const nowIso = new Date().toISOString();
+    if (authMode === 'firebase') {
+      if (!isOnline) {
+        throw new Error('تجاهل التنبيه في الوضع السحابي يتطلب اتصالًا بالإنترنت.');
+      }
+      const { dismissedAt, auditEntry } = await dismissStockAlertRuleFs(
+        ruleId,
+        { balance, date },
+        profile,
+      );
+      await commitState((prev) => ({
+        ...prev,
+        stockAlertRules: prev.stockAlertRules.map((r) =>
+          r.id === ruleId
+            ? {
+                ...r,
+                status: 'dismissed',
+                dismissedAt,
+                dismissedBalance: balance,
+                dismissedDate: date,
+                updatedAt: dismissedAt,
+              }
+            : r,
+        ),
+        auditLogs: [auditEntry, ...prev.auditLogs],
+      }));
+      pushToast({ type: 'info', title: 'تم تجاهل التنبيه', description: 'يمكنك إعادة ضبطه في أي وقت.' });
+      return;
+    }
+
+    await commitState((prev) => ({
+      ...prev,
+      stockAlertRules: prev.stockAlertRules.map((r) =>
+        r.id === ruleId
+          ? {
+              ...r,
+              status: 'dismissed',
+              dismissedAt: nowIso,
+              dismissedBalance: balance,
+              dismissedDate: date,
+              updatedAt: nowIso,
+            }
+          : r,
+      ),
+    }));
+    addAuditEntryLocal('DISMISS_STOCK_ALERT', 'stock_alert_rules', ruleId, `تجاهل تنبيه المخزون (${ruleId})`);
+    pushToast({ type: 'info', title: 'تم تجاهل التنبيه', description: 'يمكنك إعادة ضبطه في أي وقت.' });
+  };
+
+  const resetStockAlertRule = async (ruleId: string) => {
+    if (!profile || profile.role === 'viewer') {
+      throw new Error('حساب المشاهدة فقط لا يملك صلاحية إعادة ضبط التنبيهات.');
+    }
+    const nowIso = new Date().toISOString();
+    if (authMode === 'firebase') {
+      if (!isOnline) {
+        throw new Error('إعادة ضبط التنبيه في الوضع السحابي يتطلب اتصالًا بالإنترنت.');
+      }
+      const { auditEntry } = await resetStockAlertRuleFs(ruleId, profile);
+      await commitState((prev) => ({
+        ...prev,
+        stockAlertRules: prev.stockAlertRules.map((r) =>
+          r.id === ruleId
+            ? {
+                ...r,
+                status: 'active',
+                isEnabled: true,
+                dismissedAt: null,
+                dismissedBalance: null,
+                dismissedDate: null,
+                lastEmailSentAt: null,
+                lastEmailStatus: null,
+                lastEmailMessage: '',
+                updatedAt: nowIso,
+              }
+            : r,
+        ),
+        auditLogs: [auditEntry, ...prev.auditLogs],
+      }));
+      pushToast({ type: 'success', title: 'تمت إعادة ضبط التنبيه وتفعيله من جديد' });
+      return;
+    }
+
+    await commitState((prev) => ({
+      ...prev,
+      stockAlertRules: prev.stockAlertRules.map((r) =>
+        r.id === ruleId
+          ? {
+              ...r,
+              status: 'active',
+              isEnabled: true,
+              dismissedAt: null,
+              dismissedBalance: null,
+              dismissedDate: null,
+              lastEmailSentAt: null,
+              lastEmailStatus: null,
+              lastEmailMessage: '',
+              updatedAt: nowIso,
+            }
+          : r,
+      ),
+    }));
+    addAuditEntryLocal('RESET_STOCK_ALERT', 'stock_alert_rules', ruleId, `إعادة ضبط تنبيه المخزون (${ruleId})`);
+    pushToast({ type: 'success', title: 'تمت إعادة ضبط التنبيه وتفعيله من جديد' });
+  };
+
+  const resetAllDismissedStockAlerts = async (ruleIds: string[]) => {
+    if (ruleIds.length === 0) return;
+    for (const id of ruleIds) {
+      await resetStockAlertRule(id);
+    }
+  };
+
+  const toggleStockAlertRuleEnabled = async (ruleId: string, isEnabled: boolean) => {
+    if (!profile || profile.role === 'viewer') {
+      throw new Error('حساب المشاهدة فقط لا يملك صلاحية تعديل قواعد التنبيه.');
+    }
+    const nowIso = new Date().toISOString();
+    if (authMode === 'firebase') {
+      if (!isOnline) {
+        throw new Error('تعديل حالة القاعدة في الوضع السحابي يتطلب اتصالًا بالإنترنت.');
+      }
+      const { auditEntry } = await toggleStockAlertRuleEnabledFs(ruleId, isEnabled, profile);
+      await commitState((prev) => ({
+        ...prev,
+        stockAlertRules: prev.stockAlertRules.map((r) =>
+          r.id === ruleId ? { ...r, isEnabled, updatedAt: nowIso } : r,
+        ),
+        auditLogs: [auditEntry, ...prev.auditLogs],
+      }));
+      pushToast({
+        type: 'info',
+        title: isEnabled ? 'تم تفعيل قاعدة التنبيه' : 'تم إيقاف قاعدة التنبيه مؤقتًا',
+      });
+      return;
+    }
+
+    await commitState((prev) => ({
+      ...prev,
+      stockAlertRules: prev.stockAlertRules.map((r) =>
+        r.id === ruleId ? { ...r, isEnabled, updatedAt: nowIso } : r,
+      ),
+    }));
+    addAuditEntryLocal(
+      isEnabled ? 'ENABLE_STOCK_ALERT_RULE' : 'DISABLE_STOCK_ALERT_RULE',
+      'stock_alert_rules',
+      ruleId,
+      `${isEnabled ? 'تفعيل' : 'إيقاف'} قاعدة تنبيه المخزون (${ruleId})`,
+    );
+    pushToast({
+      type: 'info',
+      title: isEnabled ? 'تم تفعيل قاعدة التنبيه' : 'تم إيقاف قاعدة التنبيه مؤقتًا',
+    });
+  };
+
+  const deleteStockAlertRule = async (ruleId: string) => {
+    if (!profile || profile.role === 'viewer') {
+      throw new Error('حساب المشاهدة فقط لا يملك صلاحية حذف قواعد التنبيه.');
+    }
+    if (authMode === 'firebase') {
+      if (!isOnline) {
+        throw new Error('حذف قاعدة التنبيه في الوضع السحابي يتطلب اتصالًا بالإنترنت.');
+      }
+      const { auditEntry } = await deleteStockAlertRuleFs(ruleId, profile);
+      await commitState((prev) => ({
+        ...prev,
+        stockAlertRules: prev.stockAlertRules.filter((r) => r.id !== ruleId),
+        auditLogs: [auditEntry, ...prev.auditLogs],
+      }));
+      pushToast({ type: 'success', title: 'تم حذف قاعدة التنبيه نهائيًا' });
+      return;
+    }
+
+    await commitState((prev) => ({
+      ...prev,
+      stockAlertRules: prev.stockAlertRules.filter((r) => r.id !== ruleId),
+    }));
+    addAuditEntryLocal('DELETE_STOCK_ALERT_RULE', 'stock_alert_rules', ruleId, `حذف قاعدة تنبيه المخزون (${ruleId})`);
+    pushToast({ type: 'success', title: 'تم حذف قاعدة التنبيه نهائيًا' });
+  };
+
+  const sendStockAlertEmailNow = async (
+    item: EvaluatedStockAlert,
+  ): Promise<{ ok: boolean; status: StockAlertEmailStatus; message: string }> => {
+    if (!profile || profile.role !== 'admin') {
+      const msg = 'إرسال البريد الإلكتروني من الخادم (SMTP) مقصور على مدير النظام فقط.';
+      pushToast({ type: 'warning', title: 'غير مصرح', description: msg });
+      return { ok: false, status: 'failed', message: msg };
+    }
+    if (!item.rule.notifyEmail || !item.rule.recipientEmail.trim()) {
+      const msg = 'هذه القاعدة غير مضبوطة ببريد إلكتروني مستلم.';
+      pushToast({ type: 'warning', title: 'تعذر الإرسال', description: msg });
+      return { ok: false, status: 'failed', message: msg };
+    }
+
+    const nowIso = new Date().toISOString();
+
+    if (authMode !== 'firebase' || smtpEmailConfigured !== true) {
+      const msg = 'ميزة إرسال البريد عبر SMTP معطّلة تلقائيًا لعدم ضبط إعدادات SMTP.';
+      return { ok: false, status: 'unconfigured', message: msg };
+    }
+
+    const token = await getIdToken();
+    if (!token) {
+      throw new Error('يجب تسجيل الدخول بحساب Google المعتمد لإرسال بريد التنبيه.');
+    }
+    const appCheckToken = await getAppCheckToken();
+
+    // Send ONLY ruleId — server reads recipient and builds fixed message strictly from Firestore
+    const res = await fetch('/api/alerts/send-email', {
+      method: 'POST',
+      cache: 'no-store',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Firebase-Auth': token,
+        ...(appCheckToken ? { 'X-Firebase-AppCheck': appCheckToken } : {}),
+      },
+      body: JSON.stringify({
+        ruleId: item.rule.id,
+      }),
+    });
+
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      status?: StockAlertEmailStatus;
+      message?: string;
+      error?: string;
+    };
+
+    const status: StockAlertEmailStatus =
+      data.status === 'sent' || data.status === 'unconfigured' || data.status === 'failed'
+        ? data.status
+        : res.ok
+          ? 'sent'
+          : res.status === 503
+            ? 'unconfigured'
+            : 'failed';
+    const message =
+      data.message ||
+      data.error ||
+      (status === 'sent' ? 'تم إرسال بريد التنبيه بنجاح.' : 'تعذر إرسال بريد التنبيه.');
+    const sentAt = status === 'sent' ? nowIso : null;
+
+    if (status === 'unconfigured') {
+      setSmtpEmailConfigured(false);
+    } else if (status === 'sent') {
+      setSmtpEmailConfigured(true);
+    }
+
+    await recordStockAlertEmailResultFs(item.rule.id, { status, message, sentAt }).catch(() => {});
+    await commitState((prev) => ({
+      ...prev,
+      stockAlertRules: prev.stockAlertRules.map((r) =>
+        r.id === item.rule.id
+          ? {
+              ...r,
+              lastEmailSentAt: sentAt || r.lastEmailSentAt || null,
+              lastEmailStatus: status,
+              lastEmailMessage: message,
+              updatedAt: nowIso,
+            }
+          : r,
+      ),
+    }));
+
+    pushToast({
+      type: status === 'sent' ? 'success' : status === 'unconfigured' ? 'warning' : 'error',
+      title:
+        status === 'sent'
+          ? 'تم إرسال تنبيه البريد الإلكتروني'
+          : status === 'unconfigured'
+            ? 'ميزة SMTP معطّلة'
+            : 'فشل إرسال بريد التنبيه',
+      description: message,
+    });
+    return { ok: status === 'sent', status, message };
+  };
+
   const exportBackupJson = () => {
     const snapshot = {
       schemaVersion: 'dst-backup-v4',
@@ -2193,7 +2721,8 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
       disbursements: state.disbursements,
       tractors: state.tractors,
       settings: state.settings,
-      users: state.users,
+      stockAlertRules: state.stockAlertRules,
+      users: stripSensitiveUserFields(state.users),
       invites: state.invites,
     };
     return JSON.stringify(snapshot, null, 2);
@@ -2290,6 +2819,14 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
       updateUserRole,
       cleanupLegacyPasswordHashes,
       updateSettings,
+      smtpEmailConfigured,
+      saveStockAlertRule,
+      dismissStockAlertRule,
+      resetStockAlertRule,
+      resetAllDismissedStockAlerts,
+      toggleStockAlertRuleEnabled,
+      deleteStockAlertRule,
+      sendStockAlertEmailNow,
       exportBackupJson,
       restoreBackupJson,
       addAuditEntryLocal,
@@ -2299,6 +2836,7 @@ export const AppDataProvider: React.FC<{ children: React.ReactNode }> = ({ child
       loadingData,
       offlineQueue,
       isSyncing,
+      smtpEmailConfigured,
       toasts,
       theme,
       toggleTheme,

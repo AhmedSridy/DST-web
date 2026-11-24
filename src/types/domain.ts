@@ -87,6 +87,7 @@ export interface UserProfile {
   permissions?: GranularPermissions;
   inviteId?: string;
   isActive: boolean;
+  hasLegacyPasswordHash?: boolean;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -264,6 +265,32 @@ export interface SystemSettings {
   treatEmptyAsZero: boolean;
   minThresholds: FertilizerThresholdConfig;
   assocMinThresholds?: Record<string, Partial<FertilizerThresholdConfig>>;
+}
+
+export type StockAlertStatus = 'active' | 'dismissed';
+export type StockAlertEmailStatus = 'sent' | 'failed' | 'unconfigured';
+
+export interface StockAlertRule {
+  id: string;
+  governorateId: string;
+  associationId: string;
+  fertilizerCode: 'urea' | 'nitrate' | 'sulfate';
+  minThreshold: number;
+  notifyInApp: boolean;
+  notifyEmail: boolean;
+  recipientEmail: string;
+  isEnabled: boolean;
+  status: StockAlertStatus;
+  dismissedAt?: string | null;
+  dismissedBalance?: number | null;
+  dismissedDate?: string | null;
+  lastEmailSentAt?: string | null;
+  lastEmailStatus?: StockAlertEmailStatus | null;
+  lastEmailMessage?: string;
+  createdByUid: string;
+  createdByName: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface SheetOcrExtractedRow {

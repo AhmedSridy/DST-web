@@ -2,15 +2,20 @@ import React, { useMemo } from 'react';
 import {
   AlertTriangle,
   ArrowUpLeft,
+  Calendar,
   CheckCircle2,
   ClipboardList,
+  Minus,
   Package,
+  TrendingDown,
+  TrendingUp,
   Truck,
 } from 'lucide-react';
 import {
   Bar,
   BarChart,
   CartesianGrid,
+  Cell,
   Legend,
   ResponsiveContainer,
   Tooltip,
@@ -18,7 +23,11 @@ import {
   YAxis,
 } from 'recharts';
 import { useAppData } from '../context/AppDataContext.tsx';
-import { getGovernoratesWithActiveAssociations } from '../utils/analytics.ts';
+import { getTodayDateIso } from '../data/seedData.ts';
+import {
+  computeTodayVsLastMonthDisbursement,
+  getGovernoratesWithActiveAssociations,
+} from '../utils/analytics.ts';
 import { formatNumberAr } from '../utils/calculations.ts';
 import { STATUS_LABELS_AR } from '../utils/rbac.ts';
 
@@ -58,6 +67,16 @@ export const DashboardView: React.FC<{
       activeAssociations,
     };
   }, [associations, disbursements, reports, tractors]);
+
+  const todayVsLastMonth = useMemo(
+    () =>
+      computeTodayVsLastMonthDisbursement({
+        reports,
+        disbursements,
+        todayDate: getTodayDateIso(),
+      }),
+    [disbursements, reports],
+  );
 
   const activeChartGovs = useMemo(
     () => getGovernoratesWithActiveAssociations(governorates, associations),
@@ -227,6 +246,230 @@ export const DashboardView: React.FC<{
           </p>
         </div>
       </div>
+
+      {/* Today vs Same Day Last Month Comparison Card */}
+      <section
+        aria-label="مقارنة إجمالي الأسمدة المنصرفة اليوم بنفس اليوم من الشهر الماضي"
+        className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl p-5"
+      >
+        <div className="flex flex-col md:flex-row md:items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+              إجمالي الأسمدة المنصرفة اليوم مقارنة بنفس اليوم من الشهر الماضي
+            </h3>
+            <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
+              <span className="inline-flex items-center gap-1">
+                <Calendar className="w-3.5 h-3.5 text-slate-400" />
+                اليوم: <span className="font-mono-num text-slate-700 dark:text-slate-300">{todayVsLastMonth.todayDate}</span>
+              </span>
+              <span aria-hidden="true">·</span>
+              <span>
+                نفس اليوم من الشهر الماضي:{' '}
+                <span className="font-mono-num text-slate-700 dark:text-slate-300">
+                  {todayVsLastMonth.prevMonthDate}
+                </span>
+              </span>
+            </p>
+          </div>
+
+          {(todayVsLastMonth.hasTodayData || todayVsLastMonth.hasPrevMonthData) && (
+            <div className="flex items-center gap-2 text-xs font-semibold shrink-0">
+              {todayVsLastMonth.direction === 'up' ? (
+                <TrendingUp className="w-4 h-4 text-emerald-700 dark:text-emerald-400" />
+              ) : todayVsLastMonth.direction === 'down' ? (
+                <TrendingDown className="w-4 h-4 text-rose-600 dark:text-rose-400" />
+              ) : (
+                <Minus className="w-4 h-4 text-slate-500 dark:text-slate-400" />
+              )}
+              <span
+                className={
+                  todayVsLastMonth.direction === 'up'
+                    ? 'text-emerald-700 dark:text-emerald-400'
+                    : todayVsLastMonth.direction === 'down'
+                      ? 'text-rose-700 dark:text-rose-400'
+                      : 'text-slate-600 dark:text-slate-300'
+                }
+              >
+                {todayVsLastMonth.direction === 'up'
+                  ? 'ارتفاع'
+                  : todayVsLastMonth.direction === 'down'
+                    ? 'انخفاض'
+                    : 'دون تغير'}
+                {' · '}
+                {todayVsLastMonth.percentChange !== null ? (
+                  <span className="font-mono-num" dir="ltr">
+                    {todayVsLastMonth.percentChange > 0 ? '+' : ''}
+                    {todayVsLastMonth.percentChange}%
+                  </span>
+                ) : (
+                  <span>لا يوجد منصرف مسجّل في الشهر الماضي</span>
+                )}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Summary Metrics Row (hairline divided, no nested cards) */}
+        <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x sm:divide-x-reverse divide-slate-200 dark:divide-slate-800 border-y border-slate-200 dark:border-slate-800">
+          <div className="py-3 sm:pl-4">
+            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+              إجمالي منصرف اليوم
+            </p>
+            <p className="mt-1 flex items-baseline gap-1.5 text-xl font-bold text-slate-900 dark:text-slate-100">
+              <span className="font-mono-num">{formatNumberAr(todayVsLastMonth.todayTotal)}</span>
+              <span className="text-xs font-normal text-slate-500 dark:text-slate-400">شيكارة</span>
+            </p>
+            {!todayVsLastMonth.hasTodayData && (
+              <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                لم يُسجَّل صرف اليوم بعد
+              </p>
+            )}
+          </div>
+
+          <div className="py-3 sm:px-4">
+            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+              نفس اليوم من الشهر الماضي
+            </p>
+            <p className="mt-1 flex items-baseline gap-1.5 text-xl font-bold text-slate-900 dark:text-slate-100">
+              <span className="font-mono-num">{formatNumberAr(todayVsLastMonth.prevMonthTotal)}</span>
+              <span className="text-xs font-normal text-slate-500 dark:text-slate-400">شيكارة</span>
+            </p>
+            {!todayVsLastMonth.hasPrevMonthData && (
+              <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                لا توجد قيود صرف مسجلة في هذا التاريخ
+              </p>
+            )}
+          </div>
+
+          <div className="py-3 sm:pr-4">
+            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+              مقدار التغير (اليوم − الشهر الماضي)
+            </p>
+            <p
+              className={`mt-1 flex items-baseline gap-1.5 text-xl font-bold ${
+                todayVsLastMonth.direction === 'up'
+                  ? 'text-emerald-700 dark:text-emerald-400'
+                  : todayVsLastMonth.direction === 'down'
+                    ? 'text-rose-700 dark:text-rose-400'
+                    : 'text-slate-700 dark:text-slate-300'
+              }`}
+            >
+              <span className="font-mono-num">
+                {todayVsLastMonth.deltaBags > 0 ? '+' : ''}
+                {formatNumberAr(todayVsLastMonth.deltaBags)}
+              </span>
+              <span className="text-xs font-normal text-slate-500 dark:text-slate-400">شيكارة</span>
+            </p>
+            <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+              {todayVsLastMonth.percentChange !== null ? (
+                <>
+                  نسبة التغير:{' '}
+                  <span className="font-mono-num">
+                    {todayVsLastMonth.percentChange > 0 ? '+' : ''}
+                    {todayVsLastMonth.percentChange}%
+                  </span>
+                </>
+              ) : (
+                'مقارنة بصفر في نفس اليوم من الشهر الماضي'
+              )}
+            </p>
+          </div>
+        </div>
+
+        {!todayVsLastMonth.hasTodayData && !todayVsLastMonth.hasPrevMonthData ? (
+          <div className="mt-4 py-8 px-4 flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-slate-200 dark:border-slate-700 text-center">
+            <p className="text-sm text-slate-500 dark:text-slate-400">
+              لا توجد بيانات منصرف مسجلة لليوم ({todayVsLastMonth.todayDate}) أو لنفس اليوم من الشهر الماضي ({todayVsLastMonth.prevMonthDate}) بعد.
+            </p>
+            <button
+              type="button"
+              onClick={() => onNavigate('sheet')}
+              className="mt-1 inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700 dark:text-emerald-400 hover:underline"
+            >
+              <span>تسجيل كشف اليوم</span>
+              <ArrowUpLeft className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        ) : (
+          <div className="mt-5 grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <div className="lg:col-span-5">
+              <p className="text-xs font-semibold text-slate-700 dark:text-slate-300 mb-2">
+                مقارنة الإجمالي (شيكارة)
+              </p>
+              <div className="h-56 w-full" dir="ltr">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart
+                    data={todayVsLastMonth.summaryChartData}
+                    margin={{ top: 10, right: 12, left: 0, bottom: 4 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke="#94a3b8" strokeOpacity={0.25} />
+                    <XAxis dataKey="label" tick={{ fontSize: 12, fill: '#64748b' }} />
+                    <YAxis tick={{ fontSize: 12, fill: '#64748b' }} />
+                    <Tooltip
+                      formatter={(value) => [
+                        `${formatNumberAr(Number(value ?? 0))} شيكارة`,
+                        'الإجمالي المنصرف',
+                      ]}
+                    />
+                    <Bar
+                      dataKey="المنصرف"
+                      maxBarSize={56}
+                      radius={[4, 4, 0, 0]}
+                      isAnimationActive={false}
+                    >
+                      {todayVsLastMonth.summaryChartData.map((entry) => (
+                        <Cell
+                          key={entry.key}
+                          fill={entry.key === 'today' ? '#047857' : '#94a3b8'}
+                        />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            <div className="lg:col-span-7">
+              <p className="text-xs font-semibold text-slate-700 dark:text-slate-300 mb-2">
+                تفصيل المقارنة حسب الصنف (يوريا · نترات · سلفات)
+              </p>
+              <div className="h-56 w-full" dir="ltr">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart
+                    data={todayVsLastMonth.fertilizerChartData}
+                    margin={{ top: 10, right: 12, left: 0, bottom: 4 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke="#94a3b8" strokeOpacity={0.25} />
+                    <XAxis dataKey="name" tick={{ fontSize: 12, fill: '#64748b' }} />
+                    <YAxis tick={{ fontSize: 12, fill: '#64748b' }} />
+                    <Tooltip
+                      formatter={(value, name) => [
+                        `${formatNumberAr(Number(value ?? 0))} شيكارة`,
+                        String(name ?? ''),
+                      ]}
+                    />
+                    <Legend />
+                    <Bar
+                      dataKey="الشهر الماضي"
+                      fill="#94a3b8"
+                      maxBarSize={32}
+                      radius={[4, 4, 0, 0]}
+                      isAnimationActive={false}
+                    />
+                    <Bar
+                      dataKey="اليوم"
+                      fill="#047857"
+                      maxBarSize={32}
+                      radius={[4, 4, 0, 0]}
+                      isAnimationActive={false}
+                    />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
 
       {/* Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

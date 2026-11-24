@@ -147,7 +147,7 @@ export const SheetImageReaderCard: React.FC<SheetImageReaderCardProps> = ({
     try {
       const converted: QueuedPage[] = [];
       for (let i = 0; i < files.length; i++) {
-        const resized = await resizeImageForUpload(files[i], 1800, 0.9);
+        const resized = await resizeImageForUpload(files[i]);
         converted.push({
           id: `pg-${Date.now()}-${i}`,
           name: files[i].name || `صفحة ${i + 1}`,

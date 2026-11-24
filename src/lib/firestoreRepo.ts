@@ -42,12 +42,21 @@ import type {
   OfflineQueueItem,
   ReportStatus,
   RoleDefinition,
+  StockAlertEmailStatus,
+  StockAlertRule,
+  StockAlertStatus,
   SystemSettings,
   TractorDelivery,
   UserInvite,
   UserProfile,
   UserRole,
 } from '../types/domain.ts';
+import { validateStockAlertRuleInput } from '../utils/stockAlerts.ts';
+import {
+  buildExistingDisbursementIdMap,
+  deduplicateDisbursementRows,
+  resolveRestoredDisbursementTarget,
+} from '../utils/disbursementDedup.ts';
 import { addDaysIso } from '../utils/analytics.ts';
 import {
   computeAssociationLockId,
@@ -137,6 +146,9 @@ function normalizeUserDoc(id: string, data: DocumentData): UserProfile {
       : {}),
     ...(typeof data.inviteId === 'string' ? { inviteId: data.inviteId } : {}),
     isActive: data.isActive !== false,
+    ...(Object.prototype.hasOwnProperty.call(data, 'passwordHash')
+      ? { hasLegacyPasswordHash: true }
+      : {}),
     ...(toIsoString(data.createdAt) ? { createdAt: toIsoString(data.createdAt) } : {}),
     ...(toIsoString(data.updatedAt) ? { updatedAt: toIsoString(data.updatedAt) } : {}),
   };
@@ -159,6 +171,46 @@ function normalizeInviteDoc(id: string, data: DocumentData): UserInvite {
     invitedByUid: String(data.invitedByUid || data.createdByUid || ''),
     ...(toIsoString(data.createdAt) ? { createdAt: toIsoString(data.createdAt) } : {}),
     ...(toIsoString(data.updatedAt) ? { updatedAt: toIsoString(data.updatedAt) } : {}),
+  };
+}
+
+function normalizeStockAlertRuleDoc(id: string, data: DocumentData): StockAlertRule {
+  const nowIso = new Date().toISOString();
+  const rawFert = String(data.fertilizerCode || 'urea');
+  const fertilizerCode: StockAlertRule['fertilizerCode'] =
+    rawFert === 'nitrate' || rawFert === 'sulfate' ? rawFert : 'urea';
+  const rawStatus = String(data.status || 'active');
+  const status: StockAlertStatus = rawStatus === 'dismissed' ? 'dismissed' : 'active';
+  const rawEmailStatus = data.lastEmailStatus;
+  const lastEmailStatus: StockAlertEmailStatus | null =
+    rawEmailStatus === 'sent' || rawEmailStatus === 'failed' || rawEmailStatus === 'unconfigured'
+      ? rawEmailStatus
+      : null;
+
+  return {
+    id,
+    governorateId: String(data.governorateId || ''),
+    associationId: String(data.associationId || ''),
+    fertilizerCode,
+    minThreshold: Number(data.minThreshold ?? 0),
+    notifyInApp: data.notifyInApp !== false,
+    notifyEmail: Boolean(data.notifyEmail),
+    recipientEmail: typeof data.recipientEmail === 'string' ? data.recipientEmail : '',
+    isEnabled: data.isEnabled !== false,
+    status,
+    dismissedAt: typeof data.dismissedAt === 'string' ? data.dismissedAt : null,
+    dismissedBalance:
+      typeof data.dismissedBalance === 'number' && Number.isFinite(data.dismissedBalance)
+        ? data.dismissedBalance
+        : null,
+    dismissedDate: typeof data.dismissedDate === 'string' ? data.dismissedDate : null,
+    lastEmailSentAt: typeof data.lastEmailSentAt === 'string' ? data.lastEmailSentAt : null,
+    lastEmailStatus,
+    lastEmailMessage: typeof data.lastEmailMessage === 'string' ? data.lastEmailMessage : '',
+    createdByUid: String(data.createdByUid || ''),
+    createdByName: typeof data.createdByName === 'string' ? data.createdByName : '',
+    createdAt: toIsoString(data.createdAt) || nowIso,
+    updatedAt: toIsoString(data.updatedAt) || nowIso,
   };
 }
 
@@ -492,6 +544,7 @@ export async function fetchBootstrapDataFs(actor: UserProfile): Promise<{
   attachments: ImageAttachmentRecord[];
   settings: SystemSettings;
   notifications: AppNotification[];
+  stockAlertRules: StockAlertRule[];
   auditLogs: AuditLogEntry[];
   users: UserProfile[];
   invites: UserInvite[];
@@ -517,6 +570,7 @@ export async function fetchBootstrapDataFs(actor: UserProfile): Promise<{
     approvalDocs,
     intLogDocs,
     attDocs,
+    stockAlertDocs,
     usersSnap,
     invitesSnap,
     auditSnap,
@@ -535,6 +589,7 @@ export async function fetchBootstrapDataFs(actor: UserProfile): Promise<{
     queryByGovernorates('approvals', scopedGovIds),
     queryByGovernorates('integration_logs', scopedGovIds),
     queryByGovernorates('images_attachments', scopedGovIds),
+    queryByGovernorates('stock_alert_rules', scopedGovIds).catch(() => []),
     actor.role === 'admin' ? listCollectionSafe('users') : Promise.resolve(null),
     actor.role === 'admin' ? listCollectionSafe('user_invites') : Promise.resolve(null),
     actor.role === 'admin' ? listCollectionSafe('audit_logs') : Promise.resolve(null),
@@ -796,6 +851,10 @@ export async function fetchBootstrapDataFs(actor: UserProfile): Promise<{
         .slice(0, 300)
     : [];
 
+  const stockAlertRules: StockAlertRule[] = stockAlertDocs
+    .map((d) => normalizeStockAlertRuleDoc(d.id, d.data))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+
   return {
     roles,
     fertilizerTypes,
@@ -811,6 +870,7 @@ export async function fetchBootstrapDataFs(actor: UserProfile): Promise<{
     attachments,
     settings,
     notifications,
+    stockAlertRules,
     auditLogs,
     users,
     invites,
@@ -1423,25 +1483,58 @@ export async function restoreDayRecordsFs(
       }),
     );
   }
-  for (const r of snapshot.rows) {
-    const targetReportId = r.reportId || reportId;
-    const deterministicId = `${targetReportId}_${r.associationId}_${r.fertilizerCode}`;
-    ops.push((b) =>
-      b.set(doc(db, 'daily_disbursements', deterministicId), {
-        reportId: targetReportId,
-        governorateId: snapshot.governorateId,
-        associationId: r.associationId,
-        fertilizerCode: r.fertilizerCode,
-        openingBalance: r.openingBalance,
-        closingBalance: r.closingBalance,
-        settlementQty: r.settlementQty,
-        actualDisbursed: r.actualDisbursed,
-        variance: r.variance,
-        varianceReason: r.varianceReason || '',
-        createdByUid: actor.uid,
-        updatedAt: serverTimestamp(),
-      }),
-    );
+  const existingRowsSnap = await getDocs(
+    query(
+      collection(db, 'daily_disbursements'),
+      where('governorateId', '==', snapshot.governorateId),
+      where('reportId', '==', reportId),
+    ),
+  );
+  const existingIdMap = buildExistingDisbursementIdMap(
+    existingRowsSnap.docs.map((d) => {
+      const data = d.data();
+      return {
+        id: d.id,
+        reportId: String(data.reportId || reportId),
+        associationId: String(data.associationId || ''),
+        fertilizerCode: String(data.fertilizerCode || ''),
+        createdByUid: typeof data.createdByUid === 'string' ? data.createdByUid : undefined,
+      };
+    }),
+  );
+
+  const uniqueRows = deduplicateDisbursementRows(
+    snapshot.rows.map((r) => ({
+      ...r,
+      reportId: r.reportId || reportId,
+    })),
+  );
+
+  for (const r of uniqueRows) {
+    const target = resolveRestoredDisbursementTarget(existingIdMap, {
+      reportId: r.reportId,
+      associationId: r.associationId,
+      fertilizerCode: r.fertilizerCode,
+    });
+    const firestorePayload = {
+      reportId: r.reportId,
+      governorateId: snapshot.governorateId,
+      associationId: r.associationId,
+      fertilizerCode: r.fertilizerCode,
+      openingBalance: r.openingBalance,
+      closingBalance: r.closingBalance,
+      settlementQty: r.settlementQty,
+      actualDisbursed: r.actualDisbursed,
+      variance: r.variance,
+      varianceReason: r.varianceReason || '',
+      createdByUid: target.isExisting ? target.existingCreatedByUid || actor.uid : actor.uid,
+      updatedAt: serverTimestamp(),
+    };
+    if (target.isExisting) {
+      ops.push((b) => b.update(doc(db, 'daily_disbursements', target.id), firestorePayload));
+    } else {
+      ops.push((b) => b.set(doc(db, 'daily_disbursements', target.id), firestorePayload));
+    }
   }
   await commitBatchedWrites(ops);
   await writeAuditLogFs({
@@ -1745,7 +1838,7 @@ export async function deleteAssociationPermanentlyFs(
     throw new Error('صلاحية الحذف النهائي للجمعيات مقصورة على مدير النظام فقط.');
   }
 
-  const [disbSnap, tracSnap, attSnap] = await Promise.all([
+  const [disbSnap, tracSnap, attSnap, alertRulesSnap] = await Promise.all([
     getDocs(
       query(
         collection(db, 'daily_disbursements'),
@@ -1767,6 +1860,13 @@ export async function deleteAssociationPermanentlyFs(
         where('associationId', '==', association.id),
       ),
     ),
+    getDocs(
+      query(
+        collection(db, 'stock_alert_rules'),
+        where('governorateId', '==', association.governorateId),
+        where('associationId', '==', association.id),
+      ),
+    ).catch(() => null),
   ]);
 
   // Delete linked records first, then name lock(s), then association doc LAST so partial failure allows clean retry
@@ -1779,6 +1879,11 @@ export async function deleteAssociationPermanentlyFs(
   }
   for (const d of attSnap.docs) {
     ops.push((b) => b.delete(d.ref));
+  }
+  if (alertRulesSnap) {
+    for (const d of alertRulesSnap.docs) {
+      ops.push((b) => b.delete(d.ref));
+    }
   }
 
   const candidateLockIds = Array.from(
@@ -2603,26 +2708,48 @@ export async function restoreBackupSnapshotFs(
     }
   }
 
-  if (payload.disbursements) {
-    for (const d of payload.disbursements) {
+  if (payload.disbursements && payload.disbursements.length > 0) {
+    const existingDisbSnap = await getDocs(collection(db, 'daily_disbursements'));
+    const existingIdMap = buildExistingDisbursementIdMap(
+      existingDisbSnap.docs.map((docSnap) => {
+        const data = docSnap.data();
+        return {
+          id: docSnap.id,
+          reportId: String(data.reportId || ''),
+          associationId: String(data.associationId || ''),
+          fertilizerCode: String(data.fertilizerCode || ''),
+          createdByUid: typeof data.createdByUid === 'string' ? data.createdByUid : undefined,
+        };
+      }),
+    );
+
+    const uniqueDisbursements = deduplicateDisbursementRows(payload.disbursements);
+    for (const d of uniqueDisbursements) {
       const govId = d.governorateId || d.reportId.split('-').slice(1, -3).join('-') || 'gov-ismailia';
-      const deterministicId = `${d.reportId}_${d.associationId}_${d.fertilizerCode}`;
-      ops.push((b) =>
-        b.set(doc(db, 'daily_disbursements', deterministicId), {
-          reportId: d.reportId,
-          governorateId: govId,
-          associationId: d.associationId,
-          fertilizerCode: d.fertilizerCode,
-          openingBalance: d.openingBalance,
-          closingBalance: d.closingBalance,
-          settlementQty: d.settlementQty,
-          actualDisbursed: d.actualDisbursed,
-          variance: d.variance,
-          varianceReason: sanitizeExtractedText(d.varianceReason || ''),
-          createdByUid: actor.uid,
-          updatedAt: serverTimestamp(),
-        }),
-      );
+      const target = resolveRestoredDisbursementTarget(existingIdMap, {
+        reportId: d.reportId,
+        associationId: d.associationId,
+        fertilizerCode: d.fertilizerCode,
+      });
+      const firestorePayload = {
+        reportId: d.reportId,
+        governorateId: govId,
+        associationId: d.associationId,
+        fertilizerCode: d.fertilizerCode,
+        openingBalance: d.openingBalance,
+        closingBalance: d.closingBalance,
+        settlementQty: d.settlementQty,
+        actualDisbursed: d.actualDisbursed,
+        variance: d.variance,
+        varianceReason: sanitizeExtractedText(d.varianceReason || ''),
+        createdByUid: target.isExisting ? target.existingCreatedByUid || actor.uid : actor.uid,
+        updatedAt: serverTimestamp(),
+      };
+      if (target.isExisting) {
+        ops.push((b) => b.update(doc(db, 'daily_disbursements', target.id), firestorePayload));
+      } else {
+        ops.push((b) => b.set(doc(db, 'daily_disbursements', target.id), firestorePayload));
+      }
     }
   }
 
@@ -2734,3 +2861,293 @@ export async function processOfflineBatchFs(
 
   return { processedIds, errors, skippedWarnings };
 }
+
+export interface SaveStockAlertRuleInput {
+  id?: string;
+  governorateId: string;
+  associationId: string;
+  fertilizerCode: 'urea' | 'nitrate' | 'sulfate';
+  minThreshold: number;
+  notifyInApp: boolean;
+  notifyEmail: boolean;
+  recipientEmail: string;
+  isEnabled?: boolean;
+}
+
+export async function saveStockAlertRuleFs(
+  input: SaveStockAlertRuleInput,
+  actor: UserProfile,
+): Promise<{ rule: StockAlertRule; auditEntry: AuditLogEntry }> {
+  if (actor.role === 'viewer') {
+    throw new Error('حساب المشاهدة فقط لا يملك صلاحية إنشاء أو تعديل قواعد تنبيه المخزون.');
+  }
+  if (!canAccessGovernorate(actor, input.governorateId)) {
+    throw new Error('ليس لديك صلاحية الوصول إلى هذه المحافظة.');
+  }
+
+  const cleanEmail = input.recipientEmail.trim().slice(0, 160);
+  const validation = validateStockAlertRuleInput({
+    governorateId: input.governorateId,
+    associationId: input.associationId,
+    fertilizerCode: input.fertilizerCode,
+    minThreshold: Number(input.minThreshold),
+    notifyInApp: Boolean(input.notifyInApp),
+    notifyEmail: Boolean(input.notifyEmail),
+    recipientEmail: cleanEmail,
+  });
+  if (!validation.ok) {
+    throw new Error(validation.error);
+  }
+
+  const nowIso = new Date().toISOString();
+  const isUpdate = Boolean(input.id);
+  const ruleId = input.id || makeDocId('salert');
+  const ref = doc(db, 'stock_alert_rules', ruleId);
+
+  try {
+    if (isUpdate) {
+      const existingSnap = await getDoc(ref);
+      if (!existingSnap.exists()) {
+        throw new Error('قاعدة التنبيه المطلوبة غير موجودة.');
+      }
+      const existingRule = normalizeStockAlertRuleDoc(existingSnap.id, existingSnap.data());
+      await updateDoc(ref, {
+        minThreshold: Number(input.minThreshold),
+        notifyInApp: Boolean(input.notifyInApp),
+        notifyEmail: Boolean(input.notifyEmail),
+        recipientEmail: input.notifyEmail ? cleanEmail : '',
+        isEnabled: input.isEnabled !== undefined ? Boolean(input.isEnabled) : existingRule.isEnabled,
+        status: 'active',
+        dismissedAt: null,
+        dismissedBalance: null,
+        dismissedDate: null,
+        updatedAt: serverTimestamp(),
+      });
+
+      const updated: StockAlertRule = {
+        ...existingRule,
+        minThreshold: Number(input.minThreshold),
+        notifyInApp: Boolean(input.notifyInApp),
+        notifyEmail: Boolean(input.notifyEmail),
+        recipientEmail: input.notifyEmail ? cleanEmail : '',
+        isEnabled: input.isEnabled !== undefined ? Boolean(input.isEnabled) : existingRule.isEnabled,
+        status: 'active',
+        dismissedAt: null,
+        dismissedBalance: null,
+        dismissedDate: null,
+        updatedAt: nowIso,
+      };
+
+      const auditEntry = await writeAuditLogFs({
+        actor,
+        action: 'UPDATE_STOCK_ALERT_RULE',
+        entityType: 'stock_alert_rules',
+        entityId: ruleId,
+        details: `تعديل قاعدة تنبيه المخزون للجمعية ${updated.associationId} (${updated.fertilizerCode}) — الحد الأدنى: ${updated.minThreshold}`,
+        oldValue: {
+          minThreshold: existingRule.minThreshold,
+          notifyInApp: existingRule.notifyInApp,
+          notifyEmail: existingRule.notifyEmail,
+        },
+        newValue: {
+          minThreshold: updated.minThreshold,
+          notifyInApp: updated.notifyInApp,
+          notifyEmail: updated.notifyEmail,
+        },
+      });
+      return { rule: updated, auditEntry };
+    }
+
+    const payload = {
+      governorateId: input.governorateId,
+      associationId: input.associationId,
+      fertilizerCode: input.fertilizerCode,
+      minThreshold: Number(input.minThreshold),
+      notifyInApp: Boolean(input.notifyInApp),
+      notifyEmail: Boolean(input.notifyEmail),
+      recipientEmail: input.notifyEmail ? cleanEmail : '',
+      isEnabled: input.isEnabled !== false,
+      status: 'active' as const,
+      dismissedAt: null,
+      dismissedBalance: null,
+      dismissedDate: null,
+      lastEmailSentAt: null,
+      lastEmailStatus: null,
+      lastEmailMessage: '',
+      createdByUid: actor.uid,
+      createdByName: actor.displayName.slice(0, 120),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    };
+
+    await setDoc(ref, payload);
+
+    const created: StockAlertRule = {
+      id: ruleId,
+      governorateId: payload.governorateId,
+      associationId: payload.associationId,
+      fertilizerCode: payload.fertilizerCode,
+      minThreshold: payload.minThreshold,
+      notifyInApp: payload.notifyInApp,
+      notifyEmail: payload.notifyEmail,
+      recipientEmail: payload.recipientEmail,
+      isEnabled: payload.isEnabled,
+      status: 'active',
+      dismissedAt: null,
+      dismissedBalance: null,
+      dismissedDate: null,
+      lastEmailSentAt: null,
+      lastEmailStatus: null,
+      lastEmailMessage: '',
+      createdByUid: actor.uid,
+      createdByName: payload.createdByName,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+
+    const auditEntry = await writeAuditLogFs({
+      actor,
+      action: 'CREATE_STOCK_ALERT_RULE',
+      entityType: 'stock_alert_rules',
+      entityId: ruleId,
+      details: `إنشاء قاعدة تنبيه مخزون للجمعية ${created.associationId} (${created.fertilizerCode}) عند حد أدنى ${created.minThreshold}`,
+      newValue: {
+        associationId: created.associationId,
+        fertilizerCode: created.fertilizerCode,
+        minThreshold: created.minThreshold,
+        notifyInApp: created.notifyInApp,
+        notifyEmail: created.notifyEmail,
+      },
+    });
+    return { rule: created, auditEntry };
+  } catch (error) {
+    handleFirestoreError(
+      error,
+      isUpdate ? OperationType.UPDATE : OperationType.CREATE,
+      `stock_alert_rules/${ruleId}`,
+    );
+  }
+}
+
+export async function dismissStockAlertRuleFs(
+  ruleId: string,
+  snapshot: { balance: number | null; date: string | null },
+  actor: UserProfile,
+): Promise<{ dismissedAt: string; auditEntry: AuditLogEntry }> {
+  const ref = doc(db, 'stock_alert_rules', ruleId);
+  const dismissedAt = new Date().toISOString();
+  try {
+    await updateDoc(ref, {
+      status: 'dismissed',
+      dismissedAt,
+      dismissedBalance: snapshot.balance,
+      dismissedDate: snapshot.date || null,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `stock_alert_rules/${ruleId}`);
+  }
+  const auditEntry = await writeAuditLogFs({
+    actor,
+    action: 'DISMISS_STOCK_ALERT',
+    entityType: 'stock_alert_rules',
+    entityId: ruleId,
+    details: `تجاهل تنبيه المخزون (${ruleId}) عند الرصيد ${snapshot.balance ?? 'غير مسجل'}`,
+    newValue: { status: 'dismissed', balance: snapshot.balance, date: snapshot.date },
+  });
+  return { dismissedAt, auditEntry };
+}
+
+export async function resetStockAlertRuleFs(
+  ruleId: string,
+  actor: UserProfile,
+): Promise<{ auditEntry: AuditLogEntry }> {
+  const ref = doc(db, 'stock_alert_rules', ruleId);
+  try {
+    await updateDoc(ref, {
+      status: 'active',
+      isEnabled: true,
+      dismissedAt: null,
+      dismissedBalance: null,
+      dismissedDate: null,
+      lastEmailSentAt: null,
+      lastEmailStatus: null,
+      lastEmailMessage: '',
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `stock_alert_rules/${ruleId}`);
+  }
+  const auditEntry = await writeAuditLogFs({
+    actor,
+    action: 'RESET_STOCK_ALERT',
+    entityType: 'stock_alert_rules',
+    entityId: ruleId,
+    details: `إعادة ضبط وتفعيل تنبيه المخزون (${ruleId})`,
+    newValue: { status: 'active', isEnabled: true },
+  });
+  return { auditEntry };
+}
+
+export async function toggleStockAlertRuleEnabledFs(
+  ruleId: string,
+  isEnabled: boolean,
+  actor: UserProfile,
+): Promise<{ auditEntry: AuditLogEntry }> {
+  const ref = doc(db, 'stock_alert_rules', ruleId);
+  try {
+    await updateDoc(ref, {
+      isEnabled,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `stock_alert_rules/${ruleId}`);
+  }
+  const auditEntry = await writeAuditLogFs({
+    actor,
+    action: isEnabled ? 'ENABLE_STOCK_ALERT_RULE' : 'DISABLE_STOCK_ALERT_RULE',
+    entityType: 'stock_alert_rules',
+    entityId: ruleId,
+    details: `${isEnabled ? 'تفعيل' : 'إيقاف'} قاعدة تنبيه المخزون (${ruleId})`,
+    newValue: { isEnabled },
+  });
+  return { auditEntry };
+}
+
+export async function recordStockAlertEmailResultFs(
+  ruleId: string,
+  result: { status: StockAlertEmailStatus; message: string; sentAt: string | null },
+): Promise<void> {
+  const ref = doc(db, 'stock_alert_rules', ruleId);
+  try {
+    await updateDoc(ref, {
+      lastEmailSentAt: result.sentAt,
+      lastEmailStatus: result.status,
+      lastEmailMessage: result.message.slice(0, 390),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `stock_alert_rules/${ruleId}`);
+  }
+}
+
+export async function deleteStockAlertRuleFs(
+  ruleId: string,
+  actor: UserProfile,
+): Promise<{ auditEntry: AuditLogEntry }> {
+  const ref = doc(db, 'stock_alert_rules', ruleId);
+  try {
+    await deleteDoc(ref);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `stock_alert_rules/${ruleId}`);
+  }
+  const auditEntry = await writeAuditLogFs({
+    actor,
+    action: 'DELETE_STOCK_ALERT_RULE',
+    entityType: 'stock_alert_rules',
+    entityId: ruleId,
+    details: `حذف قاعدة تنبيه المخزون (${ruleId})`,
+  });
+  return { auditEntry };
+}
+

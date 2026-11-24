@@ -90,7 +90,9 @@ service cloud.firestore {
       return ('lastApprovalId' in incoming()) &&
         isValidId(incoming().lastApprovalId) &&
         existsAfter(/databases/$(database)/documents/approvals/$(incoming().lastApprovalId)) &&
+        getAfter(/databases/$(database)/documents/approvals/$(incoming().lastApprovalId)).data.fromStatus == existing().status &&
         getAfter(/databases/$(database)/documents/approvals/$(incoming().lastApprovalId)).data.toStatus == incoming().status &&
+        getAfter(/databases/$(database)/documents/approvals/$(incoming().lastApprovalId)).data.governorateId == existing().governorateId &&
         getAfter(/databases/$(database)/documents/approvals/$(incoming().lastApprovalId)).data.reportId == reportId &&
         getAfter(/databases/$(database)/documents/approvals/$(incoming().lastApprovalId)).data.actorUid == request.auth.uid;
     }
@@ -435,6 +437,32 @@ service cloud.firestore {
         (!('seedVersion' in data) || (data.seedVersion is string && data.seedVersion.size() <= 32));
     }
 
+    function isValidStockAlertRule(data) {
+      return data.keys().hasAll(['governorateId', 'associationId', 'fertilizerCode', 'minThreshold', 'notifyInApp', 'notifyEmail', 'isEnabled', 'status', 'createdByUid']) &&
+        data.keys().hasOnly(['governorateId', 'associationId', 'fertilizerCode', 'minThreshold', 'notifyInApp', 'notifyEmail', 'recipientEmail', 'isEnabled', 'status', 'dismissedAt', 'dismissedBalance', 'dismissedDate', 'lastEmailSentAt', 'lastEmailStatus', 'lastEmailMessage', 'createdByUid', 'createdByName', 'createdAt', 'updatedAt']) &&
+        isValidId(data.governorateId) &&
+        isValidId(data.associationId) &&
+        data.fertilizerCode in ['urea', 'nitrate', 'sulfate'] &&
+        data.minThreshold is number && data.minThreshold >= 0 &&
+        data.notifyInApp is bool &&
+        data.notifyEmail is bool &&
+        (data.notifyInApp == true || data.notifyEmail == true) &&
+        (!('recipientEmail' in data) || (data.recipientEmail is string && data.recipientEmail.size() <= 160)) &&
+        (!data.notifyEmail || ('recipientEmail' in data && data.recipientEmail is string && data.recipientEmail.size() >= 5 && data.recipientEmail.size() <= 160)) &&
+        data.isEnabled is bool &&
+        data.status in ['active', 'dismissed'] &&
+        (!('dismissedAt' in data) || data.dismissedAt == null || (data.dismissedAt is string && data.dismissedAt.size() <= 40)) &&
+        (!('dismissedBalance' in data) || isNullableNumber(data.dismissedBalance)) &&
+        (!('dismissedDate' in data) || data.dismissedDate == null || data.dismissedDate == '' || isValidDateIso(data.dismissedDate)) &&
+        (!('lastEmailSentAt' in data) || data.lastEmailSentAt == null || (data.lastEmailSentAt is string && data.lastEmailSentAt.size() <= 40)) &&
+        (!('lastEmailStatus' in data) || data.lastEmailStatus == null || data.lastEmailStatus in ['sent', 'failed', 'unconfigured']) &&
+        (!('lastEmailMessage' in data) || (data.lastEmailMessage is string && data.lastEmailMessage.size() <= 400)) &&
+        isValidId(data.createdByUid) &&
+        (!('createdByName' in data) || (data.createdByName is string && data.createdByName.size() <= 120)) &&
+        (!('createdAt' in data) || data.createdAt is timestamp) &&
+        (!('updatedAt' in data) || data.updatedAt is timestamp);
+    }
+
     // ==================== Collections ====================
     // Health check document for startup testConnection()
     match /test/connection {
@@ -766,6 +794,41 @@ service cloud.firestore {
           incoming().diff(existing()).affectedKeys().hasOnly(['minThresholds', 'assocMinThresholds']))
       );
       allow delete: if false;
+    }
+
+    // Per-Association Fertilizer Stock Alert Rules (Governorate-scoped; dismiss/reset/edit by creator, supervisor, chief, or admin)
+    match /stock_alert_rules/{ruleId} {
+      allow get: if isValidId(ruleId) && isActiveCaller() && userCanAccessGov(existing().governorateId);
+      allow list: if isUnrestrictedGovCaller() || (
+        isActiveCaller() &&
+        userCanAccessGov(resource.data.governorateId)
+      );
+      allow create: if isValidId(ruleId) && isActiveCaller() && isValidStockAlertRule(incoming()) &&
+        userCanAccessGov(incoming().governorateId) &&
+        !hasRole(['viewer']) &&
+        incoming().createdByUid == request.auth.uid &&
+        (!('createdAt' in incoming()) || incoming().createdAt == request.time) &&
+        (!('updatedAt' in incoming()) || incoming().updatedAt == request.time);
+      allow update: if isValidId(ruleId) && isActiveCaller() && isValidStockAlertRule(incoming()) &&
+        incoming().governorateId == existing().governorateId &&
+        incoming().associationId == existing().associationId &&
+        incoming().fertilizerCode == existing().fertilizerCode &&
+        incoming().createdByUid == existing().createdByUid &&
+        (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt) &&
+        (!('updatedAt' in incoming()) || incoming().updatedAt == request.time) && (
+          isAdmin() || (
+            userCanAccessGov(existing().governorateId) &&
+            !hasRole(['viewer']) &&
+            (existing().createdByUid == request.auth.uid || hasRole(['supervisor', 'chief']))
+          )
+        );
+      allow delete: if isValidId(ruleId) && isActiveCaller() && (
+        isAdmin() || (
+          userCanAccessGov(existing().governorateId) &&
+          !hasRole(['viewer']) &&
+          (existing().createdByUid == request.auth.uid || hasRole(['supervisor', 'chief']))
+        )
+      );
     }
   }
 }

@@ -53,7 +53,7 @@ export const ManifestOcrPanel: React.FC<ManifestOcrPanelProps> = ({ onApproveFil
   const handleFileSelected = async (file: File) => {
     setProcessing(true);
     try {
-      const resized = await resizeImageForUpload(file, 1800, 0.9);
+      const resized = await resizeImageForUpload(file);
       setImageDataUrl(resized.dataUrl);
 
       if (authMode !== 'firebase') {

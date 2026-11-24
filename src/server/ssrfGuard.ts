@@ -1,5 +1,7 @@
+import dnsCallback, { type LookupAddress, type LookupAllOptions, type LookupOneOptions } from 'node:dns';
 import dns from 'node:dns/promises';
 import net from 'node:net';
+import { Agent } from 'undici';
 
 function ipv4ToInt(ip: string): number | null {
   const parts = ip.split('.');
@@ -94,6 +96,18 @@ const BLOCKED_HOSTNAMES = new Set([
   'metadata.goog',
 ]);
 
+function isBlockedHostname(rawHostname: string): boolean {
+  const hostname = rawHostname.toLowerCase().replace(/^\[|\]$/g, '');
+  return (
+    !hostname ||
+    BLOCKED_HOSTNAMES.has(hostname) ||
+    hostname.endsWith('.localhost') ||
+    hostname.endsWith('.local') ||
+    hostname.endsWith('.internal') ||
+    hostname.endsWith('.home.arpa')
+  );
+}
+
 export function validateCentralApiUrlSyntax(
   rawUrl: string,
 ): { ok: true; url: URL } | { ok: false; reason: string } {
@@ -128,13 +142,7 @@ export function validateCentralApiUrlSyntax(
     return { ok: false, reason: 'اسم المضيف في رابط التكامل مفقود.' };
   }
 
-  if (
-    BLOCKED_HOSTNAMES.has(hostname) ||
-    hostname.endsWith('.localhost') ||
-    hostname.endsWith('.local') ||
-    hostname.endsWith('.internal') ||
-    hostname.endsWith('.home.arpa')
-  ) {
+  if (isBlockedHostname(hostname)) {
     return {
       ok: false,
       reason: 'مرفوض أمنيًا: لا يُسمح بالإرسال إلى localhost أو نطاقات الشبكة الداخلية.',
@@ -184,4 +192,94 @@ export async function validateCentralApiUrl(
       reason: 'تعذر التحقق من عنوان DNS لرابط التكامل المركزي أو تعذر الوصول إليه.',
     };
   }
+}
+
+export type BaseDnsLookup = (
+  hostname: string,
+  options: LookupOneOptions | LookupAllOptions,
+  callback: (err: NodeJS.ErrnoException | null, address: string | LookupAddress[], family?: number) => void,
+) => void;
+
+const SSRF_BLOCKED_IP_ERROR =
+  'مرفوض أمنيًا (حماية SSRF): عنوان IP المحلول عند الاتصال يشير إلى شبكة خاصة أو محلية.';
+
+/**
+ * Connect-time DNS lookup wrapper that validates every resolved IP address
+ * immediately before opening the TCP socket, closing the DNS rebinding TOCTOU window.
+ */
+export function createSsrfSafeLookup(
+  baseLookup: BaseDnsLookup = dnsCallback.lookup as unknown as BaseDnsLookup,
+) {
+  return (
+    hostname: string,
+    options: LookupOneOptions | LookupAllOptions | ((err: NodeJS.ErrnoException | null, address: string | LookupAddress[], family?: number) => void),
+    maybeCallback?: (err: NodeJS.ErrnoException | null, address: string | LookupAddress[], family?: number) => void,
+  ): void => {
+    const opts = typeof options === 'function' ? {} : options || {};
+    const callback = typeof options === 'function' ? options : maybeCallback!;
+
+    if (isBlockedHostname(hostname)) {
+      const err = new Error(SSRF_BLOCKED_IP_ERROR) as NodeJS.ErrnoException;
+      err.code = 'ERR_SSRF_BLOCKED_HOST';
+      callback(err, '');
+      return;
+    }
+
+    const wantAll = Boolean((opts as LookupAllOptions).all);
+    const lookupOpts: LookupAllOptions = {
+      ...opts,
+      all: true,
+    };
+
+    baseLookup(hostname, lookupOpts, (err, resolved) => {
+      if (err) {
+        callback(err, wantAll ? [] : '');
+        return;
+      }
+
+      const records: LookupAddress[] = Array.isArray(resolved)
+        ? resolved
+        : resolved
+          ? [{ address: resolved, family: net.isIP(resolved) === 6 ? 6 : 4 }]
+          : [];
+
+      if (records.length === 0) {
+        const emptyErr = new Error('تعذر حل عنوان DNS عند الاتصال.') as NodeJS.ErrnoException;
+        emptyErr.code = 'ENOTFOUND';
+        callback(emptyErr, wantAll ? [] : '');
+        return;
+      }
+
+      for (const rec of records) {
+        if (isBlockedIpAddress(rec.address)) {
+          const blockedErr = new Error(SSRF_BLOCKED_IP_ERROR) as NodeJS.ErrnoException;
+          blockedErr.code = 'ERR_SSRF_BLOCKED_IP';
+          callback(blockedErr, wantAll ? [] : '');
+          return;
+        }
+      }
+
+      if (wantAll) {
+        callback(null, records);
+      } else {
+        callback(null, records[0].address, records[0].family);
+      }
+    });
+  };
+}
+
+/**
+ * Creates an undici Agent whose TCP connector validates every resolved IP
+ * at connect time using `createSsrfSafeLookup` (prevents DNS rebinding).
+ */
+export function createSsrfSafeDispatcher(): Agent {
+  return new Agent({
+    connect: {
+      lookup: createSsrfSafeLookup() as unknown as NonNullable<
+        NonNullable<ConstructorParameters<typeof Agent>[0]>['connect']
+      > extends { lookup?: infer L }
+        ? L
+        : never,
+    },
+  });
 }

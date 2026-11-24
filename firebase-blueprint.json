@@ -312,6 +312,43 @@
         "seedVersion": { "type": "string", "maxLength": 32 }
       },
       "required": ["requireDriverNationalId", "centralApiUrl", "autoSyncOnApproval"]
+    },
+    "StockAlertRule": {
+      "title": "StockAlertRule",
+      "description": "User-configured low-stock threshold alert rule per association warehouse and fertilizer type",
+      "type": "object",
+      "properties": {
+        "governorateId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "associationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "fertilizerCode": { "type": "string", "enum": ["urea", "nitrate", "sulfate"], "maxLength": 32 },
+        "minThreshold": { "type": "number" },
+        "notifyInApp": { "type": "boolean" },
+        "notifyEmail": { "type": "boolean" },
+        "recipientEmail": { "type": "string", "maxLength": 160 },
+        "isEnabled": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["active", "dismissed"], "maxLength": 20 },
+        "dismissedAt": { "type": "string", "maxLength": 40 },
+        "dismissedBalance": { "type": "number" },
+        "dismissedDate": { "type": "string", "maxLength": 20 },
+        "lastEmailSentAt": { "type": "string", "maxLength": 40 },
+        "lastEmailStatus": { "type": "string", "enum": ["sent", "failed", "unconfigured"], "maxLength": 20 },
+        "lastEmailMessage": { "type": "string", "maxLength": 400 },
+        "createdByUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_-]+$" },
+        "createdByName": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "governorateId",
+        "associationId",
+        "fertilizerCode",
+        "minThreshold",
+        "notifyInApp",
+        "notifyEmail",
+        "isEnabled",
+        "status",
+        "createdByUid"
+      ]
     }
   },
   "firestore": {
@@ -386,6 +423,10 @@
     "/system_settings/{settingId}": {
       "schema": { "$ref": "#/entities/SystemSetting" },
       "description": "System-wide configuration"
+    },
+    "/stock_alert_rules/{ruleId}": {
+      "schema": { "$ref": "#/entities/StockAlertRule" },
+      "description": "Per-association fertilizer minimum stock threshold alert rules with dismiss and reset state"
     }
   }
 }

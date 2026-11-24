@@ -12,7 +12,9 @@ import {
   computeLowBalanceAlerts,
   computeMultiDaySeries,
   computeOverdueReport,
+  computeTodayVsLastMonthDisbursement,
   getGovernoratesWithActiveAssociations,
+  getSameDayPreviousMonthIso,
 } from './analytics.ts';
 
 const govs: Governorate[] = [
@@ -384,4 +386,210 @@ test('analytics helpers safely ignore disbursements referencing permanently dele
   );
 });
 
+test('getSameDayPreviousMonthIso handles normal months, year rollover, and end-of-month clamping', () => {
+  assert.equal(getSameDayPreviousMonthIso('2026-11-21'), '2026-10-21');
+  assert.equal(getSameDayPreviousMonthIso('2026-01-15'), '2025-12-15');
+  assert.equal(getSameDayPreviousMonthIso('2026-03-31'), '2026-02-28');
+  assert.equal(getSameDayPreviousMonthIso('2024-03-31'), '2024-02-29');
+  assert.equal(getSameDayPreviousMonthIso('2026-05-31'), '2026-04-30');
+});
 
+test('computeTodayVsLastMonthDisbursement computes totals, delta, percentChange, and fixed fertilizer order', () => {
+  const momReports: DailyReport[] = [
+    {
+      id: 'rep-gov-ismailia-2026-10-21',
+      governorateId: 'gov-ismailia',
+      reportDate: '2026-10-21',
+      status: 'approved',
+      createdByUid: 'u1',
+      createdByName: 'u1',
+      centralSyncStatus: 'pending',
+      createdAt: '2026-10-21T08:00:00Z',
+      updatedAt: '2026-10-21T08:00:00Z',
+    },
+    {
+      id: 'rep-gov-ismailia-2026-11-21',
+      governorateId: 'gov-ismailia',
+      reportDate: '2026-11-21',
+      status: 'draft',
+      createdByUid: 'u1',
+      createdByName: 'u1',
+      centralSyncStatus: 'pending',
+      createdAt: '2026-11-21T08:00:00Z',
+      updatedAt: '2026-11-21T08:00:00Z',
+    },
+    {
+      id: 'rep-gov-suez-2026-11-20',
+      governorateId: 'gov-suez',
+      reportDate: '2026-11-20',
+      status: 'draft',
+      createdByUid: 'u1',
+      createdByName: 'u1',
+      centralSyncStatus: 'pending',
+      createdAt: '2026-11-20T08:00:00Z',
+      updatedAt: '2026-11-20T08:00:00Z',
+    },
+  ];
+
+  const momRows: DailyDisbursementRow[] = [
+    // Previous month same day (2026-10-21): urea 100 + nitrate 60 + sulfate 40 = 200
+    {
+      id: 'p1',
+      reportId: 'rep-gov-ismailia-2026-10-21',
+      associationId: 'a-1',
+      fertilizerCode: 'urea',
+      openingBalance: 200,
+      closingBalance: 100,
+      settlementQty: 100,
+      actualDisbursed: 100,
+      variance: 0,
+      varianceReason: '',
+      updatedAt: '2026-10-21T08:00:00Z',
+    },
+    {
+      id: 'p2',
+      reportId: 'rep-gov-ismailia-2026-10-21',
+      associationId: 'a-1',
+      fertilizerCode: 'nitrate',
+      openingBalance: 100,
+      closingBalance: 40,
+      settlementQty: 60,
+      actualDisbursed: 60,
+      variance: 0,
+      varianceReason: '',
+      updatedAt: '2026-10-21T08:00:00Z',
+    },
+    {
+      id: 'p3',
+      reportId: 'rep-gov-ismailia-2026-10-21',
+      associationId: 'a-1',
+      fertilizerCode: 'sulfate',
+      openingBalance: 80,
+      closingBalance: 40,
+      settlementQty: 40,
+      actualDisbursed: 40,
+      variance: 0,
+      varianceReason: '',
+      updatedAt: '2026-10-21T08:00:00Z',
+    },
+    // Today (2026-11-21): urea 150 + nitrate 80 + sulfate 20 = 250 (+50, +25%)
+    {
+      id: 't1',
+      reportId: 'rep-gov-ismailia-2026-11-21',
+      associationId: 'a-1',
+      fertilizerCode: 'urea',
+      openingBalance: 300,
+      closingBalance: 150,
+      settlementQty: 150,
+      actualDisbursed: 150,
+      variance: 0,
+      varianceReason: '',
+      updatedAt: '2026-11-21T08:00:00Z',
+    },
+    {
+      id: 't2',
+      reportId: 'rep-gov-ismailia-2026-11-21',
+      associationId: 'a-1',
+      fertilizerCode: 'nitrate',
+      openingBalance: 120,
+      closingBalance: 40,
+      settlementQty: 80,
+      actualDisbursed: 80,
+      variance: 0,
+      varianceReason: '',
+      updatedAt: '2026-11-21T08:00:00Z',
+    },
+    {
+      id: 't3',
+      reportId: 'rep-gov-ismailia-2026-11-21',
+      associationId: 'a-1',
+      fertilizerCode: 'sulfate',
+      openingBalance: 50,
+      closingBalance: 30,
+      settlementQty: 20,
+      actualDisbursed: 20,
+      variance: 0,
+      varianceReason: '',
+      updatedAt: '2026-11-21T08:00:00Z',
+    },
+    // Unrelated date (must be ignored)
+    {
+      id: 'other1',
+      reportId: 'rep-gov-suez-2026-11-20',
+      associationId: 'a-3',
+      fertilizerCode: 'urea',
+      openingBalance: 900,
+      closingBalance: 100,
+      settlementQty: 800,
+      actualDisbursed: 800,
+      variance: 0,
+      varianceReason: '',
+      updatedAt: '2026-11-20T08:00:00Z',
+    },
+  ];
+
+  const cmp = computeTodayVsLastMonthDisbursement({
+    reports: momReports,
+    disbursements: momRows,
+    todayDate: '2026-11-21',
+  });
+
+  assert.equal(cmp.todayDate, '2026-11-21');
+  assert.equal(cmp.prevMonthDate, '2026-10-21');
+  assert.equal(cmp.prevMonthTotal, 200);
+  assert.equal(cmp.todayTotal, 250);
+  assert.equal(cmp.deltaBags, 50);
+  assert.equal(cmp.percentChange, 25);
+  assert.equal(cmp.direction, 'up');
+  assert.equal(cmp.hasTodayData, true);
+  assert.equal(cmp.hasPrevMonthData, true);
+  assert.deepEqual(
+    cmp.byFertilizer.map((f) => f.code),
+    ['urea', 'nitrate', 'sulfate'],
+  );
+  assert.equal(cmp.byFertilizer[0].delta, 50);
+  assert.equal(cmp.byFertilizer[1].delta, 20);
+  assert.equal(cmp.byFertilizer[2].delta, -20);
+});
+
+test('computeTodayVsLastMonthDisbursement handles zero previous month and missing data cleanly without Infinity', () => {
+  const onlyTodayRows: DailyDisbursementRow[] = [
+    {
+      id: 't-only',
+      reportId: 'rep-gov-ismailia-2026-11-21',
+      associationId: 'a-1',
+      fertilizerCode: 'urea',
+      openingBalance: 100,
+      closingBalance: 60,
+      settlementQty: 40,
+      actualDisbursed: 40,
+      variance: 0,
+      varianceReason: '',
+      updatedAt: '2026-11-21T08:00:00Z',
+    },
+  ];
+
+  const onlyToday = computeTodayVsLastMonthDisbursement({
+    reports: [],
+    disbursements: onlyTodayRows,
+    todayDate: '2026-11-21',
+  });
+  assert.equal(onlyToday.todayTotal, 40);
+  assert.equal(onlyToday.prevMonthTotal, 0);
+  assert.equal(onlyToday.deltaBags, 40);
+  assert.equal(onlyToday.percentChange, null);
+  assert.equal(onlyToday.hasTodayData, true);
+  assert.equal(onlyToday.hasPrevMonthData, false);
+
+  const empty = computeTodayVsLastMonthDisbursement({
+    reports: [],
+    disbursements: [],
+    todayDate: '2026-11-21',
+  });
+  assert.equal(empty.todayTotal, 0);
+  assert.equal(empty.prevMonthTotal, 0);
+  assert.equal(empty.percentChange, 0);
+  assert.equal(empty.direction, 'same');
+  assert.equal(empty.hasTodayData, false);
+  assert.equal(empty.hasPrevMonthData, false);
+});

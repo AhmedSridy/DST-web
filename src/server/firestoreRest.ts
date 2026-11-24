@@ -21,6 +21,25 @@ const FIRESTORE_REST_BASE = `https://firestore.googleapis.com/v1/projects/${enco
 
 export const FIRESTORE_DOC_PREFIX = `projects/${firebaseProjectId}/databases/${firestoreDatabaseId}/documents`;
 
+function buildFirestoreRestHeaders(
+  idToken: string,
+  appCheckToken?: string,
+  withJsonBody = false,
+): Record<string, string> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${idToken}`,
+    Accept: 'application/json',
+  };
+  if (withJsonBody) {
+    headers['Content-Type'] = 'application/json';
+  }
+  const cleanAppCheck = appCheckToken?.trim();
+  if (cleanAppCheck) {
+    headers['X-Firebase-AppCheck'] = cleanAppCheck;
+  }
+  return headers;
+}
+
 export function decodeFirestoreValue(val: FirestoreValue | undefined): unknown {
   if (!val) return undefined;
   if ('nullValue' in val) return null;
@@ -114,15 +133,13 @@ export class FirestoreRestError extends Error {
 export async function fsRestGetDocument(
   docPath: string,
   idToken: string,
+  appCheckToken?: string,
 ): Promise<Record<string, unknown> | null> {
   const cleanPath = docPath.replace(/^\/+/, '');
   const url = `${FIRESTORE_REST_BASE}/${cleanPath}`;
   const res = await fetch(url, {
     method: 'GET',
-    headers: {
-      Authorization: `Bearer ${idToken}`,
-      Accept: 'application/json',
-    },
+    headers: buildFirestoreRestHeaders(idToken, appCheckToken, false),
     signal: AbortSignal.timeout(8000),
   });
 
@@ -144,6 +161,7 @@ export async function fsRestQueryDisbursements(
   governorateId: string,
   reportId: string,
   idToken: string,
+  appCheckToken?: string,
 ): Promise<Array<Record<string, unknown>>> {
   const url = `${FIRESTORE_REST_BASE}:runQuery`;
   const body = {
@@ -175,11 +193,7 @@ export async function fsRestQueryDisbursements(
 
   const res = await fetch(url, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${idToken}`,
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
+    headers: buildFirestoreRestHeaders(idToken, appCheckToken, true),
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(8000),
   });
@@ -188,6 +202,76 @@ export async function fsRestQueryDisbursements(
     const bodyText = await res.text().catch(() => '');
     throw new FirestoreRestError(
       `Firestore REST runQuery daily_disbursements failed (${res.status}): ${bodyText.slice(0, 200)}`,
+      res.status,
+    );
+  }
+
+  const rows = (await res.json()) as Array<{ document?: FirestoreDocument }>;
+  const results: Array<Record<string, unknown>> = [];
+  for (const entry of rows) {
+    if (!entry.document) continue;
+    const id = entry.document.name?.split('/').pop() || '';
+    results.push({
+      id,
+      ...decodeFirestoreFields(entry.document.fields),
+    });
+  }
+  return results;
+}
+
+export async function fsRestQueryAssociationDisbursements(
+  governorateId: string,
+  associationId: string,
+  fertilizerCode: string,
+  idToken: string,
+  appCheckToken?: string,
+): Promise<Array<Record<string, unknown>>> {
+  const url = `${FIRESTORE_REST_BASE}:runQuery`;
+  const body = {
+    structuredQuery: {
+      from: [{ collectionId: 'daily_disbursements' }],
+      where: {
+        compositeFilter: {
+          op: 'AND',
+          filters: [
+            {
+              fieldFilter: {
+                field: { fieldPath: 'governorateId' },
+                op: 'EQUAL',
+                value: { stringValue: governorateId },
+              },
+            },
+            {
+              fieldFilter: {
+                field: { fieldPath: 'associationId' },
+                op: 'EQUAL',
+                value: { stringValue: associationId },
+              },
+            },
+            {
+              fieldFilter: {
+                field: { fieldPath: 'fertilizerCode' },
+                op: 'EQUAL',
+                value: { stringValue: fertilizerCode },
+              },
+            },
+          ],
+        },
+      },
+    },
+  };
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: buildFirestoreRestHeaders(idToken, appCheckToken, true),
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(8000),
+  });
+
+  if (!res.ok) {
+    const bodyText = await res.text().catch(() => '');
+    throw new FirestoreRestError(
+      `Firestore REST runQuery association disbursements failed (${res.status}): ${bodyText.slice(0, 200)}`,
       res.status,
     );
   }
@@ -225,15 +309,12 @@ export interface RestCommitWrite {
 export async function fsRestCommitWrites(
   writes: RestCommitWrite[],
   idToken: string,
+  appCheckToken?: string,
 ): Promise<void> {
   const url = `${FIRESTORE_REST_BASE}:commit`;
   const res = await fetch(url, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${idToken}`,
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
+    headers: buildFirestoreRestHeaders(idToken, appCheckToken, true),
     body: JSON.stringify({ writes }),
     signal: AbortSignal.timeout(8000),
   });

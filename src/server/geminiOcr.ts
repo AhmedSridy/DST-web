@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type, type GenerateContentResponse } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type, type GenerateContentResponse } from '@google/genai';
 import type {
   AgriculturalAssociation,
   Governorate,
@@ -13,9 +13,56 @@ import {
   sanitizeExtractedText,
 } from '../utils/arabicNormalize.ts';
 
-const OCR_MODEL = process.env.GEMINI_OCR_MODEL?.trim() || 'gemini-4-hydrogen';
+export const DEFAULT_OCR_MODEL = 'gemini-4-hydrogen';
+
+const DEPRECATED_OR_UNAVAILABLE_OCR_MODELS = new Set([
+  'gemini-1.5-flash',
+  'gemini-1.5-pro',
+  'gemini-pro',
+  'gemini-2.0-flash',
+  'gemini-2.0-pro',
+  'gemini-2.0-flash-thinking',
+  'gemini-2.5-flash',
+]);
+
+export function resolveOcrModel(envModel?: string): string {
+  const trimmed = (envModel || '').trim();
+  if (!trimmed) {
+    return DEFAULT_OCR_MODEL;
+  }
+  if (DEPRECATED_OR_UNAVAILABLE_OCR_MODELS.has(trimmed.toLowerCase())) {
+    console.warn(
+      `[DST OCR] GEMINI_OCR_MODEL="${trimmed}" is deprecated/unavailable; falling back to "${DEFAULT_OCR_MODEL}".`,
+    );
+    return DEFAULT_OCR_MODEL;
+  }
+  return trimmed;
+}
+
+export function buildOcrThinkingConfig(
+  model: string,
+): { thinkingConfig: { thinkingLevel: ThinkingLevel } } | Record<string, never> {
+  // thinkingLevel is supported on Gemini 3 and Gemini 4 series models.
+  // MEDIUM balances strong Arabic OCR/RTL reasoning with low latency so reverse proxies do not time out.
+  if (/^gemini-(3|4)/i.test(model)) {
+    return {
+      thinkingConfig: {
+        thinkingLevel: ThinkingLevel.MEDIUM,
+      },
+    };
+  }
+  return {};
+}
+
+const OCR_MODEL = resolveOcrModel(process.env.GEMINI_OCR_MODEL);
 const ALLOWED_OCR_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const MAX_OCR_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB max decoded size
+
+const SHEET_OCR_SYSTEM_INSTRUCTION =
+  'أنت مدقق محاسبي دقيق جدًا متخصص في قراءة الجداول والكشوف الورقية المصرية لصرف الأسمدة الزراعية (المطبوعة والمكتوبة بخط اليد). التزم دائمًا بترتيب الأعمدة العربي من اليمين إلى اليسار [يوريا، نترات، سلفات]، ولا تخمّن أي رقم غير واضح مطلقًا (أرجِع null للخلايا الفارغة أو غير المقروءة).';
+
+const MANIFEST_OCR_SYSTEM_INSTRUCTION =
+  'أنت مدقق متخصص في قراءة بوالص شحن ونقل الأسمدة الزراعية المصرية (المطبوعة أو اليدوية). استخرج كل حقل بدقة حرفية ورقمية عالية دون أي تخمين أو افتراض؛ إن كان الحقل غير واضح أو غير موجود فأرجِع نصًا فارغًا أو null للأرقام.';
 
 export class OcrExtractionError extends Error {
   rawResponseText?: string;
@@ -29,17 +76,89 @@ export class OcrExtractionError extends Error {
   }
 }
 
-function getAiClient(): GoogleGenAI {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new OcrExtractionError(
-      'مفتاح GEMINI_API_KEY غير مهيأ على الخادم لتشغيل القراءة الذكية (OCR).',
-      'MISSING_KEY',
-    );
+const PLACEHOLDER_API_KEYS = new Set(['MY_GEMINI_API_KEY', 'YOUR_GEMINI_API_KEY']);
+const QUOTA_COOLDOWN_MS = 65_000; // 65s covers the 1-minute RPM/TPM window
+const AUTH_ERROR_COOLDOWN_MS = 5 * 60_000; // 5m cooldown for invalid/disabled backup keys
+
+/**
+ * Collects unique Gemini API keys from server environment variables in priority order:
+ * 1. GEMINI_API_KEY (primary)
+ * 2. GEMINI_API_KEYS (comma, semicolon, or newline-separated optional fallback list)
+ * 3. GEMINI_API_KEY_2 .. GEMINI_API_KEY_10 (numbered optional fallback keys)
+ */
+export function collectGeminiApiKeys(
+  env: Record<string, string | undefined> = process.env,
+): string[] {
+  const rawCandidates: string[] = [];
+  if (typeof env.GEMINI_API_KEY === 'string') {
+    rawCandidates.push(env.GEMINI_API_KEY);
   }
+  if (typeof env.GEMINI_API_KEYS === 'string') {
+    rawCandidates.push(...env.GEMINI_API_KEYS.split(/[\r\n,;]+/));
+  }
+  for (let i = 2; i <= 10; i++) {
+    const numbered = env[`GEMINI_API_KEY_${i}`];
+    if (typeof numbered === 'string') {
+      rawCandidates.push(numbered);
+    }
+  }
+
+  const seen = new Set<string>();
+  const keys: string[] = [];
+  for (const raw of rawCandidates) {
+    const trimmed = raw.trim();
+    if (!trimmed || PLACEHOLDER_API_KEYS.has(trimmed) || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    keys.push(trimmed);
+  }
+  return keys;
+}
+
+export function isQuotaOrRateLimitError(error: unknown): boolean {
+  const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return (
+    msg.includes('429') ||
+    msg.includes('resource_exhausted') ||
+    msg.includes('quota') ||
+    msg.includes('rate limit')
+  );
+}
+
+export function isAuthOrKeyError(error: unknown): boolean {
+  const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return (
+    msg.includes('api_key_invalid') ||
+    msg.includes('permission_denied') ||
+    msg.includes('api key not valid') ||
+    msg.includes('403')
+  );
+}
+
+export function isTransientServerError(error: unknown): boolean {
+  const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return (
+    msg.includes('500') ||
+    msg.includes('502') ||
+    msg.includes('503') ||
+    msg.includes('504') ||
+    msg.includes('unavailable') ||
+    msg.includes('fetch failed') ||
+    msg.includes('etimedout') ||
+    msg.includes('econnreset') ||
+    msg.includes('socket') ||
+    msg.includes('timed out') ||
+    msg.includes('timeout') ||
+    msg.includes('aborted')
+  );
+}
+
+function createAiClient(apiKey: string): GoogleGenAI {
   return new GoogleGenAI({
     apiKey,
     httpOptions: {
+      timeout: 75_000,
       headers: {
         'User-Agent': 'aistudio-build',
       },
@@ -47,30 +166,147 @@ function getAiClient(): GoogleGenAI {
   });
 }
 
-async function withExponentialBackoff<T>(fn: () => Promise<T>, maxAttempts = 3): Promise<T> {
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      return await fn();
-    } catch (error: unknown) {
-      lastError = error;
-      const msg = error instanceof Error ? error.message : String(error);
-      const isTransient =
-        msg.includes('429') ||
-        msg.includes('500') ||
-        msg.includes('503') ||
-        msg.includes('RESOURCE_EXHAUSTED') ||
-        msg.includes('UNAVAILABLE') ||
-        msg.includes('fetch');
+export class GeminiKeyFailoverManager {
+  private cooldownUntilByKey = new Map<string, number>();
+  private activeKeyIndex = 0;
 
-      if (!isTransient || attempt === maxAttempts) {
-        break;
-      }
-      const delayMs = 600 * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 250);
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
+  constructor(
+    private readonly getKeys: () => string[] = () => collectGeminiApiKeys(process.env),
+    private readonly now: () => number = () => Date.now(),
+    private readonly sleep: (ms: number) => Promise<void> = (ms) =>
+      new Promise((resolve) => setTimeout(resolve, ms)),
+    private readonly quotaCooldownMs = QUOTA_COOLDOWN_MS,
+    private readonly authCooldownMs = AUTH_ERROR_COOLDOWN_MS,
+  ) {}
+
+  /**
+   * Executes a Gemini API call with automatic, transparent failover across all configured keys.
+   * - On quota exhaustion (429 / RESOURCE_EXHAUSTED) or invalid key: immediately marks that key
+   *   in temporary cooldown and switches to the next healthy key with zero user-facing interruption.
+   * - On transient 5xx/network errors: retries briefly before failing over to another key.
+   * - On non-key errors (e.g. 404 model not found, 400 invalid image): throws immediately.
+   */
+  async execute<T>(fn: (apiKey: string, keyPosition: number, totalKeys: number) => Promise<T>): Promise<T> {
+    const keys = this.getKeys();
+    if (keys.length === 0) {
+      throw new OcrExtractionError(
+        'مفتاح GEMINI_API_KEY غير مهيأ على الخادم لتشغيل القراءة الذكية (OCR).',
+        'MISSING_KEY',
+      );
     }
+
+    const currentNow = this.now();
+    const total = keys.length;
+    const startIdx = this.activeKeyIndex % total;
+
+    // Build ordered candidate list: healthy (non-cooled-down) keys first starting from activeKeyIndex,
+    // followed by cooled-down keys sorted by soonest cooldown expiry (fallback if all are cooled down).
+    const healthyIndices: number[] = [];
+    const cooledIndices: Array<{ idx: number; until: number }> = [];
+
+    for (let offset = 0; offset < total; offset++) {
+      const idx = (startIdx + offset) % total;
+      const until = this.cooldownUntilByKey.get(keys[idx]) ?? 0;
+      if (until <= currentNow) {
+        healthyIndices.push(idx);
+      } else {
+        cooledIndices.push({ idx, until });
+      }
+    }
+
+    cooledIndices.sort((a, b) => a.until - b.until);
+    const orderedIndices =
+      healthyIndices.length > 0
+        ? healthyIndices
+        : cooledIndices.map((entry) => entry.idx);
+
+    let lastError: unknown;
+    let quotaFailures = 0;
+
+    for (let pos = 0; pos < orderedIndices.length; pos++) {
+      const keyIdx = orderedIndices[pos];
+      const apiKey = keys[keyIdx];
+      const maxAttemptsForThisKey = total === 1 ? 3 : 2;
+
+      for (let attempt = 1; attempt <= maxAttemptsForThisKey; attempt++) {
+        try {
+          const result = await fn(apiKey, keyIdx + 1, total);
+          this.activeKeyIndex = keyIdx;
+          this.cooldownUntilByKey.delete(apiKey);
+          return result;
+        } catch (error: unknown) {
+          lastError = error;
+
+          if (isQuotaOrRateLimitError(error)) {
+            quotaFailures++;
+            this.cooldownUntilByKey.set(apiKey, this.now() + this.quotaCooldownMs);
+            const hasAnotherKey = pos + 1 < orderedIndices.length;
+            if (hasAnotherKey) {
+              const nextKeyNum = orderedIndices[pos + 1] + 1;
+              console.warn(
+                `[DST OCR] API key #${keyIdx + 1}/${total} hit quota limit (429); transparently switching to key #${nextKeyNum}/${total}.`,
+              );
+              break; // Immediately fail over to next key without waiting
+            }
+            if (total === 1 && attempt < maxAttemptsForThisKey) {
+              const delayMs = 600 * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 200);
+              await this.sleep(delayMs);
+              continue;
+            }
+            break;
+          }
+
+          if (isAuthOrKeyError(error)) {
+            this.cooldownUntilByKey.set(apiKey, this.now() + this.authCooldownMs);
+            if (pos + 1 < orderedIndices.length) {
+              const nextKeyNum = orderedIndices[pos + 1] + 1;
+              console.warn(
+                `[DST OCR] API key #${keyIdx + 1}/${total} returned auth/permission error; switching to key #${nextKeyNum}/${total}.`,
+              );
+              break;
+            }
+            throw error;
+          }
+
+          if (isTransientServerError(error)) {
+            if (attempt < maxAttemptsForThisKey) {
+              const delayMs = 500 * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 200);
+              await this.sleep(delayMs);
+              continue;
+            }
+            if (pos + 1 < orderedIndices.length) {
+              const nextKeyNum = orderedIndices[pos + 1] + 1;
+              console.warn(
+                `[DST OCR] API key #${keyIdx + 1}/${total} failed after transient retries; trying key #${nextKeyNum}/${total}.`,
+              );
+              break;
+            }
+            throw error;
+          }
+
+          // Non-retryable client/model/image error -> surface immediately without burning other keys
+          throw error;
+        }
+      }
+    }
+
+    if (quotaFailures > 0 && total > 1) {
+      throw new OcrExtractionError(
+        `تم تجاوز حد الحصة المؤقتة لجميع مفاتيح الذكاء الاصطناعي المتاحة (${total}). يُرجى الانتظار دقيقة ثم إعادة المحاولة.`,
+        'QUOTA_EXCEEDED',
+      );
+    }
+
+    throw lastError;
   }
-  throw lastError;
+}
+
+const defaultKeyFailoverManager = new GeminiKeyFailoverManager();
+
+async function runWithGeminiFailover<T>(
+  operation: (ai: GoogleGenAI) => Promise<T>,
+): Promise<T> {
+  return defaultKeyFailoverManager.execute((apiKey) => operation(createAiClient(apiKey)));
 }
 
 function toArabicOcrError(error: unknown, rawText?: string): OcrExtractionError {
@@ -111,11 +347,15 @@ function toArabicOcrError(error: unknown, rawText?: string): OcrExtractionError 
     raw.includes('ECONNREFUSED') ||
     raw.includes('ENOTFOUND') ||
     raw.includes('ETIMEDOUT') ||
+    raw.includes('ECONNRESET') ||
     raw.toLowerCase().includes('fetch failed') ||
+    raw.toLowerCase().includes('timed out') ||
+    raw.toLowerCase().includes('timeout') ||
+    raw.toLowerCase().includes('aborted') ||
     raw.toLowerCase().includes('network')
   ) {
     return new OcrExtractionError(
-      'فشل الاتصال بخدمة القراءة الذكية عبر الشبكة. تحقق من الاتصال وأعد المحاولة.',
+      'فشل الاتصال بخدمة القراءة الذكية عبر الشبكة أو انتهت مهلة الاستجابة. يُرجى إعادة المحاولة.',
       'NETWORK_ERROR',
       rawText,
     );
@@ -217,7 +457,6 @@ export async function extractSheetNumbersOcr(params: {
 }): Promise<{ rows: SheetOcrExtractedRow[]; summaryNote: string; rawResponseText: string }> {
   const { base64, effectiveMime } = validateOcrImageInput(params.imageBase64, params.mimeType);
 
-  const ai = getAiClient();
   const assocNamesSample = params.associations
     .slice(0, 90)
     .map((a) => `${a.nameAr} (${a.code})`)
@@ -250,7 +489,7 @@ export async function extractSheetNumbersOcr(params: {
   let rawResponseText = '';
 
   try {
-    const response: GenerateContentResponse = await withExponentialBackoff(() =>
+    const response: GenerateContentResponse = await runWithGeminiFailover((ai) =>
       ai.models.generateContent({
         model: OCR_MODEL,
         contents: {
@@ -265,6 +504,8 @@ export async function extractSheetNumbersOcr(params: {
           ],
         },
         config: {
+          systemInstruction: SHEET_OCR_SYSTEM_INSTRUCTION,
+          ...buildOcrThinkingConfig(OCR_MODEL),
           responseMimeType: 'application/json',
           responseSchema: isFullSheet
             ? {
@@ -494,7 +735,6 @@ export async function analyzeSingleSheetOcr(params: {
 }> {
   const { base64, effectiveMime } = validateOcrImageInput(params.imageBase64, params.mimeType);
 
-  const ai = getAiClient();
   const prompt = [
     `اقرأ صورة كشف المخزون الفردي للجمعية الزراعية: "${params.associationName}" لصنف السماد: "${params.fertilizerNameAr}".`,
     `آخر رصيد مسجل بالنظام للمقارنة هو: ${params.lastRecordedBalance} شيكارة.`,
@@ -503,7 +743,7 @@ export async function analyzeSingleSheetOcr(params: {
 
   let rawResponseText = '';
   try {
-    const response = await withExponentialBackoff(() =>
+    const response = await runWithGeminiFailover((ai) =>
       ai.models.generateContent({
         model: OCR_MODEL,
         contents: {
@@ -518,6 +758,8 @@ export async function analyzeSingleSheetOcr(params: {
           ],
         },
         config: {
+          systemInstruction: SHEET_OCR_SYSTEM_INSTRUCTION,
+          ...buildOcrThinkingConfig(OCR_MODEL),
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -557,7 +799,6 @@ export async function extractManifestOcr(params: {
 }): Promise<ManifestOcrExtractedData> {
   const { base64, effectiveMime } = validateOcrImageInput(params.imageBase64, params.mimeType);
 
-  const ai = getAiClient();
   const assocSample = params.associations
     .slice(0, 60)
     .map((a) => `${a.nameAr}`)
@@ -574,7 +815,7 @@ export async function extractManifestOcr(params: {
   ].join('\n');
 
   try {
-    const response = await withExponentialBackoff(() =>
+    const response = await runWithGeminiFailover((ai) =>
       ai.models.generateContent({
         model: OCR_MODEL,
         contents: {
@@ -589,6 +830,8 @@ export async function extractManifestOcr(params: {
           ],
         },
         config: {
+          systemInstruction: MANIFEST_OCR_SYSTEM_INSTRUCTION,
+          ...buildOcrThinkingConfig(OCR_MODEL),
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,

@@ -14,8 +14,32 @@ import { registerSW } from 'virtual:pwa-register';
 import App from './App.tsx';
 import './index.css';
 
+window.addEventListener('vite:preloadError', () => {
+  const reloadKey = 'dst-chunk-reload-once';
+  if (!sessionStorage.getItem(reloadKey)) {
+    sessionStorage.setItem(reloadKey, '1');
+    window.location.reload();
+  }
+});
+
+if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+  const hadController = Boolean(navigator.serviceWorker.controller);
+  let reloadedForSw = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController && !reloadedForSw) {
+      reloadedForSw = true;
+      window.location.reload();
+    }
+  });
+}
+
 registerSW({
   immediate: true,
+  onRegisteredSW(_swUrl, registration) {
+    if (registration) {
+      registration.update().catch(() => undefined);
+    }
+  },
 });
 
 createRoot(document.getElementById('root')!).render(<App />);

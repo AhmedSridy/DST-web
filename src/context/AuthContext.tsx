@@ -11,8 +11,8 @@ const BOOTSTRAP_ADMIN_EMAIL = 'ahmedsridy@gmail.com';
 const UNAUTHORIZED_MSG =
   'حسابك غير مصرح له بالدخول إلى المنظومة. يرجى مراجعة مدير النظام لإضافة بريدك الإلكتروني أولًا.';
 
-/** Preview mode, mock users, and ?autostart=1 are strictly disabled in production builds. */
-export const IS_PREVIEW_MODE_ENABLED = !import.meta.env.PROD;
+/** Preview mode, mock users, and ?autostart=1 are strictly disabled outside Vite DEV builds. */
+export const IS_PREVIEW_MODE_ENABLED = Boolean(import.meta.env.DEV) && !import.meta.env.PROD;
 
 interface AuthContextValue {
   firebaseUser: User | null;
@@ -26,7 +26,7 @@ interface AuthContextValue {
   switchPreviewRole: (role: UserRole) => Promise<void>;
   syncPreviewProfile: (updatedUser: UserProfile) => Promise<void>;
   logout: () => Promise<void>;
-  getIdToken: () => Promise<string | null>;
+  getIdToken: (forceRefresh?: boolean) => Promise<string | null>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -348,9 +348,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setAuthMode('unauthenticated');
   };
 
-  const getIdToken = async (): Promise<string | null> => {
+  const getIdToken = async (forceRefresh = false): Promise<string | null> => {
     if (!auth.currentUser) return null;
-    return auth.currentUser.getIdToken();
+    return auth.currentUser.getIdToken(forceRefresh);
   };
 
   return (

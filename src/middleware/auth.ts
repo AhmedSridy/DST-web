@@ -16,6 +16,7 @@ export interface ActiveUserProfile {
 export interface AuthenticatedRequest extends Request {
   user?: DecodedIdToken;
   idToken?: string;
+  appCheckToken?: string;
   userProfile?: ActiveUserProfile;
 }
 
@@ -24,15 +25,16 @@ export const requireAuth = async (
   res: Response,
   next: NextFunction,
 ) => {
+  const customToken = req.header('x-firebase-auth')?.trim() || '';
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    res.status(401).json({ error: 'غير مصرح: رمز التحقق (Bearer Token) مفقود.' });
-    return;
-  }
+  const bearerToken =
+    authHeader && authHeader.startsWith('Bearer ')
+      ? authHeader.slice('Bearer '.length).trim()
+      : '';
+  const token = customToken || bearerToken;
 
-  const token = authHeader.slice('Bearer '.length).trim();
   if (!token) {
-    res.status(401).json({ error: 'غير مصرح: رمز التحقق فارغ.' });
+    res.status(401).json({ error: 'غير مصرح: رمز التحقق (Firebase Auth Token) مفقود.' });
     return;
   }
 
@@ -44,6 +46,10 @@ export const requireAuth = async (
     }
     req.user = decodedToken;
     req.idToken = token;
+    const rawAppCheck = req.header('x-firebase-appcheck')?.trim();
+    if (rawAppCheck) {
+      req.appCheckToken = rawAppCheck;
+    }
     next();
   } catch (error) {
     console.error('Firebase ID token verification failed:', error);
@@ -53,8 +59,8 @@ export const requireAuth = async (
 
 /**
  * Verifies the authenticated caller has an active `users/{uid}` profile in Firestore
- * (read via Firestore REST API using the caller's own ID token so firestore.rules applies)
- * and holds one of `allowedRoles`.
+ * (read via Firestore REST API using the caller's own ID token + optional App Check token
+ * so firestore.rules applies) and holds one of `allowedRoles`.
  */
 export function requireActiveUser(allowedRoles: UserRole[]) {
   return async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
@@ -66,7 +72,11 @@ export function requireActiveUser(allowedRoles: UserRole[]) {
     }
 
     try {
-      const userDoc = await fsRestGetDocument(`users/${encodeURIComponent(uid)}`, idToken);
+      const userDoc = await fsRestGetDocument(
+        `users/${encodeURIComponent(uid)}`,
+        idToken,
+        req.appCheckToken,
+      );
       if (!userDoc) {
         res.status(403).json({
           error: 'غير مصرح: حسابك غير مسجل في قائمة المستخدمين المعتمدين بالمنظومة.',

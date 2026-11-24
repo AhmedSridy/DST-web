@@ -54,13 +54,42 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
-          maximumFileSizeToCacheInBytes: 15 * 1024 * 1024,
+          skipWaiting: true,
+          clientsClaim: true,
+          cleanupOutdatedCaches: true,
+          maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
-          navigateFallbackDenylist: [/^\/api\//],
+          globIgnores: [
+            '**/vendor-exceljs-*.js',
+            '**/vendor-jspdf-*.js',
+            '**/vendor-html2canvas-*.js',
+            '**/vendor-heic-*.js',
+            '**/vendor-docx-*.js',
+          ],
+          runtimeCaching: [
+            {
+              urlPattern: ({ url }) => url.pathname.startsWith('/api/'),
+              handler: 'NetworkOnly',
+            },
+            {
+              urlPattern: /\/assets\/vendor-(exceljs|jspdf|html2canvas|heic|docx)-.*\.js$/i,
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'dst-heavy-lazy-chunks',
+                expiration: {
+                  maxEntries: 20,
+                  maxAgeSeconds: 60 * 60 * 24 * 30,
+                },
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+              },
+            },
+          ],
+          navigateFallbackDenylist: [/^\/api\//, /^\/assets\//, /^\/dev-sw\.js$/],
         },
         devOptions: {
-          enabled: true,
-          type: 'module',
+          enabled: false,
         },
       }),
       // Copies src/assets into dist/ so root-relative URLs like
@@ -82,6 +111,20 @@ export default defineConfig(() => {
         },
       },
     ],
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (id.includes('node_modules/exceljs')) return 'vendor-exceljs';
+            if (id.includes('node_modules/jspdf')) return 'vendor-jspdf';
+            if (id.includes('node_modules/html2canvas')) return 'vendor-html2canvas';
+            if (id.includes('node_modules/heic2any')) return 'vendor-heic';
+            if (id.includes('node_modules/docx')) return 'vendor-docx';
+            return undefined;
+          },
+        },
+      },
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

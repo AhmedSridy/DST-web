@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { isBlockedIpAddress, validateCentralApiUrlSyntax } from './ssrfGuard.ts';
+import {
+  createSsrfSafeLookup,
+  isBlockedIpAddress,
+  validateCentralApiUrlSyntax,
+  type BaseDnsLookup,
+} from './ssrfGuard.ts';
 
 test('isBlockedIpAddress blocks loopback, private, link-local, metadata, and IPv6 local addresses', () => {
   assert.equal(isBlockedIpAddress('127.0.0.1'), true);
@@ -38,4 +43,64 @@ test('validateCentralApiUrlSyntax requires HTTPS and rejects localhost/private I
 
   const valid = validateCentralApiUrlSyntax('https://api.example.gov.eg/v1/fertilizer-reports');
   assert.equal(valid.ok, true);
+});
+
+test('createSsrfSafeLookup rejects private/metadata IPs at connect time (DNS rebinding guard)', async () => {
+  const rebindingLookup: BaseDnsLookup = (_hostname, _opts, cb) => {
+    cb(null, [{ address: '169.254.169.254', family: 4 }]);
+  };
+  const safeLookup = createSsrfSafeLookup(rebindingLookup);
+
+  await assert.rejects(
+    new Promise((resolve, reject) => {
+      safeLookup('rebind.example.com', { all: true }, (err, res) => {
+        if (err) reject(err);
+        else resolve(res);
+      });
+    }),
+    /مرفوض أمنيًا/,
+  );
+
+  // Mixed public + private resolution must also be rejected completely
+  const mixedLookup: BaseDnsLookup = (_hostname, _opts, cb) => {
+    cb(null, [
+      { address: '93.184.216.34', family: 4 },
+      { address: '127.0.0.1', family: 4 },
+    ]);
+  };
+  const safeMixedLookup = createSsrfSafeLookup(mixedLookup);
+
+  await assert.rejects(
+    new Promise((resolve, reject) => {
+      safeMixedLookup('dual.example.com', {}, (err, addr) => {
+        if (err) reject(err);
+        else resolve(addr);
+      });
+    }),
+    /مرفوض أمنيًا/,
+  );
+});
+
+test('createSsrfSafeLookup permits verified public IPs in single and all modes', async () => {
+  const publicLookup: BaseDnsLookup = (_hostname, _opts, cb) => {
+    cb(null, [{ address: '93.184.216.34', family: 4 }]);
+  };
+  const safeLookup = createSsrfSafeLookup(publicLookup);
+
+  const singleResult = await new Promise<{ address: string; family?: number }>((resolve, reject) => {
+    safeLookup('api.example.gov.eg', {}, (err, address, family) => {
+      if (err) reject(err);
+      else resolve({ address: String(address), family });
+    });
+  });
+  assert.equal(singleResult.address, '93.184.216.34');
+  assert.equal(singleResult.family, 4);
+
+  const allResult = await new Promise<unknown>((resolve, reject) => {
+    safeLookup('api.example.gov.eg', { all: true }, (err, records) => {
+      if (err) reject(err);
+      else resolve(records);
+    });
+  });
+  assert.deepEqual(allResult, [{ address: '93.184.216.34', family: 4 }]);
 });

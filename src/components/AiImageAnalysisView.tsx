@@ -135,7 +135,7 @@ export const AiImageAnalysisView: React.FC = () => {
     setRawResponseText('');
     setShowRaw(false);
     try {
-      const resized = await resizeImageForUpload(file, 1800, 0.9);
+      const resized = await resizeImageForUpload(file);
       setImageDataUrl(resized.dataUrl);
 
       if (authMode !== 'firebase') {
